@@ -1,0 +1,10 @@
+# Teil 1: Agenten, Server, Client
+a2a-sdk
+httpx
+starlette
+uvicorn
+
+# Teil 2: lokales LLM für den Orchestrator
+torch
+transformers
+accelerate

@@ -41,6 +41,9 @@ AGENTS = [
     {"base_url": SERVER_URL, "path": "/greeter"},  # Agent B – Greeter
     {"base_url": SERVER_URL, "path": "/adder"},    # Adder (im PDF "Agent D")
     {"base_url": SERVER_URL, "path": "/subtractor"},  # Agent E – Subtractor
+    {"base_url": SERVER_URL, "path": "/weather"},     # Agent F – Weather
+    {"base_url": SERVER_URL, "path": "/ontology"},    # Agent G – Ontology Search
+    {"base_url": SERVER_URL, "path": "/mediator"},    # Agent H – Semantic Mediator
 ]
 
 # Lokales Modell von Hugging Face. Alternativen (gleiche Größenklasse):

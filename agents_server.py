@@ -23,7 +23,10 @@ from a2a.utils import AGENT_CARD_WELL_KNOWN_PATH
 
 from AdderAgentExecutor import AdderAgentExecutor
 from GreenAgentExecuter import GreeterAgentExecutor
+from OntologySearchAgentExecutor import OntologySearchAgentExecutor
+from SemanticMediatorAgentExecutor import SemanticMediatorAgentExecutor
 from SubtractorAgentExecutor import SubtractorAgentExecutor
+from WeatherAgentExecutor import WeatherAgentExecutor
 
 HOST = "127.0.0.1"
 PORT = 9999
@@ -35,6 +38,9 @@ AGENTEN: list[AgentExecutor] = [
     GreeterAgentExecutor(),
     AdderAgentExecutor(),
     SubtractorAgentExecutor(),
+    WeatherAgentExecutor(),
+    OntologySearchAgentExecutor(),
+    SemanticMediatorAgentExecutor(),
 ]
 
 

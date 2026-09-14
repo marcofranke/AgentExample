@@ -1,12 +1,13 @@
 # A2A-Tutorial: Agenten, die miteinander reden
 
 Dieses Projekt zeigt Schritt für Schritt, wie mehrere Agenten über das
-**A2A-Protokoll (Agent-to-Agent)** zusammenarbeiten. Es besteht aus zwei Teilen:
+**A2A-Protokoll (Agent-to-Agent)** zusammenarbeiten. Es besteht aus drei Teilen:
 
 | Teil | Was passiert | Dateien |
 |------|--------------|---------|
 | 1 | Drei einfache Agenten laufen auf einem Server. Ein Client (Agent A) findet sie über ihre „Visitenkarte“ und schickt ihnen Nachrichten. | `agents_server.py`, `Agent A.py`, `*Agent.py`, `*AgentExecutor.py` |
 | 2 | Ein Orchestrator (Agent C) hat selbst keine Fachlogik. Ein **lokales LLM** entscheidet anhand der Skill-Beschreibungen, welcher Agent zuständig ist, und der Orchestrator delegiert die Anfrage per A2A. | `agent_c_orchestrator.py` |
+| 3 | Drei Agenten, die **externe Dienste** anbinden: aktuelles Wetter (Open-Meteo), Ontologie-Suche (OLS4, LOV) und der **Semantische Mediator des BIBA**. | `WeatherAgent.py`, `OntologySearchAgent.py`, `SemanticMediatorAgent.py` |
 
 Das Tutorial folgt der PDF `A2A-Tutorial-Orchestrator-LLM.pdf`, weicht aber an
 zwei Stellen bewusst ab:
@@ -23,8 +24,9 @@ zwei Stellen bewusst ab:
 3. [Projektstruktur](#3-projektstruktur)
 4. [Teil 1: Agenten bereitstellen und ansprechen](#4-teil-1-agenten-bereitstellen-und-ansprechen)
 5. [Teil 2: Der LLM-Orchestrator](#5-teil-2-der-llm-orchestrator)
-6. [Übung: Einen eigenen Agenten anschließen](#6-übung-einen-eigenen-agenten-anschließen)
-7. [Fehlersuche](#7-fehlersuche)
+6. [Teil 3: Agenten mit externen Diensten](#6-teil-3-agenten-mit-externen-diensten)
+7. [Übung: Einen eigenen Agenten anschließen](#7-übung-einen-eigenen-agenten-anschließen)
+8. [Fehlersuche](#8-fehlersuche)
 
 ---
 
@@ -62,6 +64,7 @@ Client                          Server (Agent)
 * Python 3.12 oder neuer (das Projekt wurde mit 3.14 entwickelt)
 * Etwa 3 GB freier Speicherplatz für das lokale Sprachmodell (nur Teil 2)
 * Keine GPU nötig, das Modell läuft auf der CPU
+* Internetzugang für die Agenten aus Teil 3 (Wetter, Ontologie-Suche)
 
 ```bash
 # 1. Virtuelle Umgebung anlegen und aktivieren
@@ -74,7 +77,13 @@ pip install a2a-sdk httpx starlette uvicorn
 
 # 3. Zusätzliche Pakete für Teil 2 (lokales LLM)
 pip install torch transformers accelerate
+
+# Oder alles auf einmal:
+pip install -r requirements.txt
 ```
+
+Teil 3 braucht keine weiteren Pakete. Der Wetter-Agent und die Ontologie-Suche
+nutzen `httpx`, das mit dem A2A-SDK bereits installiert ist.
 
 Auf Windows ohne GPU installiert `pip install torch` automatisch die CPU-Variante.
 Wer eine NVIDIA-GPU nutzen möchte, folgt der Anleitung auf https://pytorch.org.
@@ -96,6 +105,14 @@ AgentExample/
 ├── SubtractorAgent.py         # Agent E: subtrahiert zwei Zahlen
 ├── SubtractorAgentExecutor.py # Subtractor: A2A-Anbindung
 │
+├── WeatherAgent.py            # Agent F: aktuelles Wetter über Open-Meteo
+├── WeatherAgentExecutor.py    # Weather: A2A-Anbindung
+├── OntologySearchAgent.py     # Agent G: Ontologien in OLS4 und LOV suchen
+├── OntologySearchAgentExecutor.py
+├── SemanticMediatorAgent.py   # Agent H: Semantischer Mediator des BIBA
+├── SemanticMediatorAgentExecutor.py
+│
+├── requirements.txt           # Alle Pakete für Teil 1 bis 3
 ├── main.py                    # PyCharm-Beispieldatei, nicht Teil des Tutorials
 └── A2A-Tutorial-Orchestrator-LLM.pdf   # Das Original-Tutorial
 ```
@@ -142,7 +159,9 @@ async def execute(self, context, event_queue):
 ```
 
 Diese Trennung ist der Kern des Tutorials: **Fachlogik und Protokoll bleiben
-getrennt.** Der Executor ist bei allen drei Agenten fast Zeile für Zeile gleich.
+getrennt.** Der Executor ist bei allen Agenten fast Zeile für Zeile gleich. Die
+Executoren aus Teil 3 fangen zusätzlich Netzwerkfehler (`httpx.HTTPError`) ab
+und melden sie als `FAILED`, weil ihre Agenten externe Dienste aufrufen.
 
 ---
 
@@ -160,6 +179,9 @@ Erwartete Ausgabe:
 [Server] Agent B – Greeter        -> http://127.0.0.1:9999/greeter  (Skill: greet)
 [Server] Agent C – Adder          -> http://127.0.0.1:9999/adder  (Skill: add)
 [Server] Agent E – Subtractor     -> http://127.0.0.1:9999/subtractor  (Skill: subtract)
+[Server] Agent F – Weather        -> http://127.0.0.1:9999/weather  (Skill: weather)
+[Server] Agent G – Ontology Search -> http://127.0.0.1:9999/ontology  (Skill: ontology_search)
+[Server] Agent H – Semantic Mediator -> http://127.0.0.1:9999/mediator  (Skill: semantic_mediation)
 INFO:     Uvicorn running on http://127.0.0.1:9999
 ```
 
@@ -274,6 +296,9 @@ Erwartete Ausgabe:
 [Orchestrator] Gefunden: Agent B – Greeter – Skills: greet
 [Orchestrator] Gefunden: Agent C – Adder – Skills: add
 [Orchestrator] Gefunden: Agent E – Subtractor – Skills: subtract
+[Orchestrator] Gefunden: Agent F – Weather – Skills: weather
+[Orchestrator] Gefunden: Agent G – Ontology Search – Skills: ontology_search
+[Orchestrator] Gefunden: Agent H – Semantic Mediator – Skills: semantic_mediation
 
 === Eingabe: Was ist 20 minus 8?
 
@@ -341,6 +366,9 @@ Diese Eingaben zeigen, wie das Routing entscheidet:
 | `Ziehe 5 von 12 ab` | `subtract` (Ergebnis 7, weil „x von y“ als y − x gilt) |
 | `10 - 3` | `subtract` |
 | `Addiere 1, 2 und 3` | `add`, aber der Agent meldet `FAILED` (drei Zahlen) |
+| `Wie ist das Wetter in Bremen?` | `weather` |
+| `Welche Ontologien gibt es für Sensoren?` | `ontology_search` |
+| `Welche Datenmodelle kennt der Mediator?` | `semantic_mediation` |
 
 Adder und Subtractor sind absichtlich ähnlich beschrieben, damit das LLM
 wirklich anhand der Beschreibung entscheiden muss. Bei mehrdeutigen Eingaben
@@ -349,7 +377,119 @@ ausgegeben, damit du siehst, was das Modell tatsächlich geantwortet hat.
 
 ---
 
-## 6. Übung: Einen eigenen Agenten anschließen
+## 6. Teil 3: Agenten mit externen Diensten
+
+Die Agenten aus Teil 1 rechnen nur mit dem Text, den sie bekommen. Die drei
+Agenten aus Teil 3 rufen echte Dienste im Internet oder im eigenen Netz auf.
+Das Muster Agent + Executor bleibt exakt gleich, nur `invoke()` wird
+aufwendiger: Text verstehen, HTTP-Aufruf, Antwort formatieren.
+
+### Agent F: Wetter (`WeatherAgent.py`)
+
+Liefert das aktuelle Wetter für einen Ort. Datenquelle ist
+[Open-Meteo](https://open-meteo.com), kostenlos und ohne API-Key.
+
+```
+>>> Wie ist das Wetter in Bremen?
+Wetter in Bremen (Freie Hansestadt Bremen, Deutschland): bedeckt, 10.7 °C
+(gefühlt 9.7 °C), Luftfeuchte 88 %, Wind 4.7 km/h. Stand: 2026-09-14T06:15 (Europe/Berlin)
+```
+
+So arbeitet `invoke()`:
+
+1. `ort_aus_text` liest den Ortsnamen: zuerst das Wort nach „in“, „für“,
+   „bei“ usw., sonst die letzte Folge großgeschriebener Wörter („New York“),
+   sonst der ganze Text.
+2. Geocoding-API: Ortsname zu Koordinaten. Kein Treffer bedeutet `ValueError`,
+   und der Executor meldet den Task als `FAILED`.
+3. Forecast-API mit `current=...`: Temperatur, gefühlte Temperatur,
+   Luftfeuchte, WMO-Wettercode, Wind. Der Wettercode wird über die Tabelle
+   `WMO_CODES` in Klartext übersetzt.
+
+### Agent G: Ontologie-Suche (`OntologySearchAgent.py`)
+
+Sucht bekannte Ontologien und Vokabulare zu einem Begriff. Zwei Register werden
+befragt, beide ohne API-Key:
+
+| Register | Was es ist | Wie wir es nutzen |
+|----------|------------|-------------------|
+| [OLS4](https://www.ebi.ac.uk/ols4) (EMBL-EBI) | Rund 280 Ontologien, Schwerpunkt Life Sciences, aber auch SOSA/SSN, PROV, Schema.org, QUDT | Klassen-Suche, Treffer nach Ontologie gruppiert, Titel per Detail-Endpunkt nachgeladen |
+| [LOV](https://lov.linkeddata.es) (Linked Open Vocabularies) | Klassisches Register für Linked-Data-Vokabulare | Vokabular-Suche. Antwortet die Seite nicht mit JSON (kommt vor), wird sie übersprungen und das steht in der Ausgabe |
+
+```
+>>> Welche Ontologien gibt es für Sensoren?
+Ontologien zu 'Sensoren':
+
+OLS4 (EMBL-EBI) – 8 Ontologien mit passenden Klassen (gesucht nach 'Sensor'):
+  • Allotrope Merged Ontology Suite [AFO]  https://www.ebi.ac.uk/ols4/ontologies/afo
+      z. B. sensor <http://purl.allotrope.org/ontologies/equipment#AFE_0002184>
+  • The Earth Metabolome Initiative (EMI) ontology [EMI]  https://www.ebi.ac.uk/ols4/ontologies/emi
+      z. B. Sensor <http://www.w3.org/ns/sosa/Sensor>
+  ...
+```
+
+OLS4 ist englisch indexiert. Damit deutsche Eingaben trotzdem Treffer liefern,
+probiert `suchvarianten` nacheinander den Begriff selbst, dann ohne typische
+Endungen („Sensoren“ wird zu „Sensor“), zuletzt den Wortstamm mit Wildcard
+(„Logistik“ wird zu „Logisti*“). Die Ausgabe nennt, welche Variante gezogen hat.
+
+### Agent H: Semantischer Mediator des BIBA (`SemanticMediatorAgent.py`)
+
+Der Semantische Mediator des BIBA (Bremer Institut für Produktion und Logistik)
+löst Interoperabilitätsprobleme zwischen heterogenen Datenquellen. Wrapper
+bilden die lokalen Sichten der Quellen (SQL, CSV, XML, REST, Kafka) auf eine
+globale Ontologie ab, und der Mediator transformiert Daten zwischen diesen
+Sichten. Hintergrund: [A Semantic Mediator for Data Integration in Autonomous
+Logistics Processes](https://link.springer.com/chapter/10.1007/978-1-84996-257-5_15)
+und [Semantic Interoperability for Logistics and Beyond](https://link.springer.com/chapter/10.1007/978-3-030-88662-2_6).
+
+Der Mediator ist **kein öffentlicher Dienst**. Der Agent spricht deshalb eine
+eigene Instanz an, deren Adresse per Umgebungsvariable gesetzt wird:
+
+```bash
+set SEMANTIC_MEDIATOR_URL=http://localhost:8080      # Windows
+set SEMANTIC_MEDIATOR_TOKEN=...                       # optional, Bearer-Token
+# export ... unter Linux / macOS
+python agents_server.py
+```
+
+Ohne gesetzte URL meldet der Agent jeden Task als `FAILED` mit einem
+klaren Hinweis. Der Agent versteht zwei Aufträge:
+
+```
+>>> Welche Datenmodelle kennt der Mediator?
+Bekannte Datenmodelle des Mediators:
+  • ERP
+  • AAS
+
+>>> Transformiere von ERP nach AAS: {"artikelnummer": "4711", "menge": 3}
+Transformation ERP -> AAS:
+{ ... Antwort des Mediators im Zielmodell ... }
+```
+
+**Anpassen an die eigene Installation.** Die REST-Schnittstelle des Mediators
+ist nicht öffentlich dokumentiert. Deshalb steckt alles, was vom konkreten
+Endpunkt abhängt, in der Klasse `MediatorClient` am Anfang der Datei:
+
+| Was | Wo | Annahme in diesem Projekt |
+|-----|----|---------------------------|
+| Modelle auflisten | `PFAD_MODELLE` | `GET /models`, Antwort ist Liste von Strings oder Objekten mit `name` |
+| Transformation | `PFAD_TRANSFORM` | `POST /transform` mit `{"sourceModel", "targetModel", "data"}`, Antwort enthält `data` |
+| Authentifizierung | `_headers()` | Bearer-Token aus `SEMANTIC_MEDIATOR_TOKEN`, falls gesetzt |
+
+Weicht die eigene Mediator-Instanz davon ab, muss nur diese Klasse geändert
+werden. Textverständnis (`auftrag_aus_text`) und A2A-Anbindung bleiben gleich.
+
+### Teil 3 im Orchestrator
+
+Alle drei Agenten sind in `AGENTS` in `agent_c_orchestrator.py` eingetragen.
+Das LLM sieht damit sechs Skills. Die Skill-Beschreibungen enthalten bewusst
+Stichwörter wie „Wetter“, „Ontologie“ und „transformieren“, damit ein kleines
+Modell die Anfragen sauber trennen kann.
+
+---
+
+## 7. Übung: Einen eigenen Agenten anschließen
 
 Ein neuer Agent braucht genau drei Änderungen. Als Beispiel ein Multiplizierer.
 
@@ -407,7 +547,7 @@ Die Skill-Beschreibung ist die einzige Information, die das Routing steuert.
 
 ---
 
-## 7. Fehlersuche
+## 8. Fehlersuche
 
 **`ConnectError` oder `Connection refused` beim Start von Agent A oder Orchestrator**
 Der Server läuft nicht. Starte zuerst `python agents_server.py` in einem
@@ -438,3 +578,24 @@ ausführen und die Nutzungsbedingungen auf der Modellseite akzeptieren.
 
 **`NotImplementedError: Abbrechen wird hier nicht unterstützt`**
 Absichtlich. Die Executor-Methode `cancel` ist im Tutorial nicht implementiert.
+
+**Wetter-Agent: `Ich kenne keinen Ort namens '...'`**
+Die Ortserkennung hat ein falsches Wort erwischt oder Open-Meteo kennt den Ort
+nicht. Formuliere mit Präposition („Wetter in Bad Homburg“) oder schicke nur
+den Ortsnamen.
+
+**Wetter- oder Ontologie-Agent: `... nicht erreichbar`**
+Kein Internetzugang, Proxy, oder der Dienst ist gerade nicht erreichbar. Beide
+Dienste brauchen keinen API-Key.
+
+**Ontologie-Agent: `LOV ... nicht erreichbar oder keine JSON-Antwort`**
+Die LOV-API liefert zeitweise nur HTML. Der Agent überspringt LOV dann und
+zeigt nur OLS4-Treffer. Das ist kein Fehler des Agenten.
+
+**Mediator-Agent: `SEMANTIC_MEDIATOR_URL ist nicht gesetzt`**
+Die Umgebungsvariable muss im Terminal gesetzt sein, in dem der
+**Server** läuft, nicht im Terminal des Clients oder Orchestrators.
+
+**Mediator-Agent: `404` oder unerwartete Antwort**
+Die Pfade oder das Nachrichtenformat der eigenen Mediator-Instanz weichen von
+den Annahmen ab. Anpassen in `MediatorClient` in `SemanticMediatorAgent.py`.
