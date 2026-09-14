@@ -65,6 +65,74 @@ LLM_DTYPE = os.environ.get("LLM_DTYPE", "float32")
 # ---------------------------------------------------------------------------
 # Das lokale LLM – ersetzt den Anthropic-Client aus dem PDF
 # ---------------------------------------------------------------------------
+def netz_diagnose(model_name: str) -> str:
+    """Sucht nach dem Grund, warum ein Modell nicht geladen werden konnte.
+
+    `transformers` wirft für jede Ursache dieselbe Sammelmeldung. Deshalb
+    fragen wir hier selbst nach und liefern Klartext: kein Netz, Proxy davor,
+    Token abgelehnt oder Cache nicht beschreibbar.
+    """
+    import glob
+    import shutil
+    import urllib.error
+    import urllib.request
+
+    hinweise: list[str] = []
+    reste: list[str] = []
+
+    cache = os.environ.get("HF_HOME", "")
+    if cache and not os.access(cache, os.W_OK):
+        hinweise.append(f"Der Cache {cache} ist nicht beschreibbar – dort muss der Download hin.")
+
+    if cache and os.path.isdir(cache):
+        # Ein abgebrochener Download hinterlässt *.incomplete-Dateien. Danach
+        # scheitert JEDER weitere Start, auch wenn das Netz längst wieder geht.
+        reste = glob.glob(os.path.join(cache, "**", "*.incomplete"), recursive=True)
+        if reste:
+            hinweise.append(
+                f"Im Cache liegen {len(reste)} abgebrochene Downloads (*.incomplete). "
+                "Das ist die wahrscheinlichste Ursache: Den Cache leeren und neu starten "
+                "(im Container: `docker compose down && docker volume rm <projekt>_hf-cache`)."
+            )
+        frei = shutil.disk_usage(cache).free / 1e9
+        if frei < 5:
+            hinweise.append(f"Nur noch {frei:.1f} GB frei – das Modell braucht rund 3,5 GB.")
+
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
+    kopf = {"Authorization": f"Bearer {token}"} if token else {}
+    anfrage = urllib.request.Request(f"https://huggingface.co/api/models/{model_name}", headers=kopf)
+    try:
+        with urllib.request.urlopen(anfrage, timeout=15) as antwort:
+            if not reste:
+                hinweise.append(
+                    f"huggingface.co ist erreichbar (HTTP {antwort.status}) und das Modell "
+                    "existiert – es liegt also nicht am Netz. Dann bleibt meist ein "
+                    "beschädigter Cache: leeren und neu starten. Sonst zeigt "
+                    "`docker compose logs` die Zeile nach '[LLM] Lade ...'."
+                )
+    except urllib.error.HTTPError as err:
+        if err.code in (401, 403) and token:
+            hinweise.append(
+                f"huggingface.co lehnt das gesetzte HF_TOKEN ab (HTTP {err.code}). "
+                "Für dieses Modell wird gar kein Token gebraucht: HF_TOKEN weglassen."
+            )
+        elif err.code in (401, 403):
+            hinweise.append(f"huggingface.co antwortet mit HTTP {err.code} – das Modell ist zugangsbeschränkt.")
+        else:
+            hinweise.append(f"huggingface.co antwortet mit HTTP {err.code} ({err.reason}).")
+    except urllib.error.URLError as err:
+        hinweise.append(
+            f"Keine Verbindung zu huggingface.co: {err.reason}. "
+            + (f"Gesetzter Proxy: {proxy}." if proxy else "Es ist kein HTTPS_PROXY gesetzt.")
+        )
+    except Exception as err:  # noqa: BLE001 – die Diagnose darf nie selbst abstürzen
+        hinweise.append(f"Verbindungstest fehlgeschlagen: {type(err).__name__}: {err}")
+
+    return " ".join(hinweise)
+
+
 class LokalesLLM:
     """Lädt ein Hugging-Face-Chatmodell einmal in den Speicher und beantwortet Prompts."""
 
@@ -81,11 +149,9 @@ class LokalesLLM:
             # you don't have a local directory with the same name"), egal ob DNS,
             # Firewall, Proxy oder Token schuld sind. Das führt in die Irre.
             raise RuntimeError(
-                f"Modell '{model_name}' konnte nicht geladen werden. Auf einem Server ist "
-                f"fast immer der Zugang zu huggingface.co das Problem (Firewall, Proxy, "
-                f"kein Internet) oder ein ungültiges HF_TOKEN. Ohne Internetzugang das "
-                f"Modell vorab herunterladen und LLM_MODEL auf den Ordner zeigen lassen – "
-                f"siehe README, Abschnitt 9. Ursprüngliche Meldung: {err}"
+                f"Modell '{model_name}' konnte nicht geladen werden. {netz_diagnose(model_name)} "
+                f"Ohne Internetzugang das Modell vorab herunterladen und LLM_MODEL auf den "
+                f"Ordner zeigen lassen – siehe README, Abschnitt 9."
             ) from err
         self.model.eval()
         print(f"[LLM] Bereit ({sum(p.numel() for p in self.model.parameters()) / 1e9:.2f} Mrd. Parameter)")
