@@ -70,11 +70,23 @@ class LokalesLLM:
 
     def __init__(self, model_name: str = LLM_MODEL) -> None:
         print(f"[LLM] Lade {model_name} (erster Start lädt das Modell herunter)...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            dtype=getattr(torch, LLM_DTYPE),   # CPU-sicher; auf GPU zusätzlich device_map="auto"
-        )
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                dtype=getattr(torch, LLM_DTYPE),   # CPU-sicher; auf GPU zusätzlich device_map="auto"
+            )
+        except OSError as err:
+            # transformers meldet hier immer dieselbe Sammelmeldung ("... make sure
+            # you don't have a local directory with the same name"), egal ob DNS,
+            # Firewall, Proxy oder Token schuld sind. Das führt in die Irre.
+            raise RuntimeError(
+                f"Modell '{model_name}' konnte nicht geladen werden. Auf einem Server ist "
+                f"fast immer der Zugang zu huggingface.co das Problem (Firewall, Proxy, "
+                f"kein Internet) oder ein ungültiges HF_TOKEN. Ohne Internetzugang das "
+                f"Modell vorab herunterladen und LLM_MODEL auf den Ordner zeigen lassen – "
+                f"siehe README, Abschnitt 9. Ursprüngliche Meldung: {err}"
+            ) from err
         self.model.eval()
         print(f"[LLM] Bereit ({sum(p.numel() for p in self.model.parameters()) / 1e9:.2f} Mrd. Parameter)")
 

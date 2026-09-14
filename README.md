@@ -1010,6 +1010,54 @@ vorhandene Standard-Bridge, und Compose legt gar kein Netz mehr an (geprüft:
 die Netzwerkliste bleibt unverändert). Bei diesem Stack aus einem einzigen
 Dienst ändert das sonst nichts – die Portfreigabe funktioniert genauso.
 
+**Im Container: `Can't load the model for 'Qwen/Qwen2.5-1.5B-Instruct'`**
+Die Meldung von `transformers` ist irreführend – der Hinweis auf ein lokales
+Verzeichnis und `pytorch_model.bin` hat mit der Ursache nichts zu tun. Es ist
+dieselbe Sammelmeldung für jeden fehlgeschlagenen Download. Auf einem Server
+heißt das praktisch immer: kein Weg zu huggingface.co.
+
+```bash
+docker compose exec -T a2a python -c "import urllib.request as u; \
+  print(u.urlopen('https://huggingface.co/api/models/Qwen/Qwen2.5-1.5B-Instruct', timeout=15).status)"
+```
+
+* **Timeout oder DNS-Fehler** → Firewall oder kein Internet im Container.
+* **Proxy nötig** → `HTTPS_PROXY` und `HTTP_PROXY` im `environment:` ergänzen.
+* **HTTP 401** → `HF_TOKEN` ist gesetzt, aber ungültig oder abgelaufen. Für
+  dieses Modell wird gar kein Token gebraucht: Variable weglassen.
+
+**Der Punkt oben rechts bleibt ewig auf „wird geladen“**
+Dieselbe Ursache, nur eine andere Ausprägung: Wird der Verkehr stillschweigend
+verworfen (DROP statt REJECT), bricht der Download nicht ab, sondern läuft in
+immer neue Wiederholungen. Der Container meldet dabei weiter „healthy“, denn
+`/api/status` antwortet ja – nur eben mit `llm_bereit: false`. Nachsehen mit
+`docker compose logs`: Bleibt es nach `[LLM] Lade ...` minutenlang still, ist
+der Weg nach draußen blockiert. Gegenprobe mit dem `urlopen`-Einzeiler oben,
+Lösung wie im vorigen Absatz.
+
+**Server ohne Internetzugang: Modell mitbringen.** Das Modell wird nicht ins
+Image gebacken, lässt sich aber vorab holen und einhängen. Auf einem Rechner
+**mit** Internet:
+
+```bash
+pip install "huggingface_hub[cli]"
+huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct --local-dir modell
+scp -r modell benutzer@server:/pfad/zum/projekt/modell
+```
+
+Dann in `docker-compose.yml` die dafür vorbereiteten Zeilen einkommentieren:
+
+```yaml
+environment:
+  - LLM_MODEL=/modell
+  - HF_HUB_OFFLINE=1
+volumes:
+  - ./modell:/modell:ro
+```
+
+`LLM_MODEL` nimmt jeden lokalen Pfad an – `transformers` lädt dann von dort
+statt aus dem Netz, und `HF_HUB_OFFLINE=1` unterbindet jeden weiteren Versuch.
+
 **`docker pull` verlangt einen Login**
 Das Paket auf ghcr.io ist standardmäßig privat. Entweder einmal
 `docker login ghcr.io` auf dem Server, oder das Paket auf GitHub unter

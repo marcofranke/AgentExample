@@ -51,6 +51,14 @@ services:
       - LLM_DTYPE=bfloat16
       # - LLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct
 
+      # Server ohne Internetzugang: Modell vorab auf einem Rechner MIT Internet
+      # holen, den Ordner hierher kopieren und die beiden nächsten Zeilen sowie
+      # die passende Zeile unter `volumes:` einkommentieren. Dann wird nichts
+      # mehr nachgeladen.
+      #   huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct --local-dir modell
+      # - LLM_MODEL=/modell
+      # - HF_HUB_OFFLINE=1
+
       # Thread-Zahl an die vorhandenen Kerne anpassen. Ohne Begrenzung belegt
       # torch alle Kerne, was auf einem geteilten Server unschön ist.
       - OMP_NUM_THREADS=4
@@ -80,6 +88,8 @@ services:
       - research-memory:/app/memory
       # PDFs, die der Research-Agent zieht.
       - research-downloads:/app/downloads
+      # Vorab heruntergeladenes Modell für Server ohne Internet (siehe oben).
+      # - ./modell:/modell:ro
 
     # Das Modell braucht Arbeitsspeicher: rund 3 GB mit bfloat16, rund 6 GB mit
     # float32, dazu etwas für Python und die Agenten. Unter 4 GB wird es eng.
