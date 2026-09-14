@@ -14,6 +14,5 @@ __pycache__/
 *.safetensors
 *.bin
 
-# Research-Agent: heruntergeladene PDFs und Gedächtnis
+# Research-Agent: heruntergeladene PDFs (das Gedächtnis in memory/ ist Teil des Repos)
 downloads/
-memory/
