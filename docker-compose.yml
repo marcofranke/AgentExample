@@ -10,6 +10,11 @@
 # heruntergeladen wird. Es landet im Volume `hf-cache` und wird danach
 # wiederverwendet – auch über `docker compose down` hinaus.
 
+# `version` ist für Compose v2 überflüssig (es zeigt dafür einen Hinweis an),
+# das alte docker-compose v1 braucht den Schlüssel aber: Ohne ihn liest v1 die
+# Datei im Uralt-Format und meldet Fehler in einem "Service namens services".
+version: "2.4"
+
 services:
   a2a:
     image: ghcr.io/marcofranke/agentexample:latest
@@ -21,39 +26,43 @@ services:
     ports:
       - "9999:9999"
 
+    # Listenform statt Zuordnung: Ein Eintrag ohne "=" reicht die Variable vom
+    # Host durch, falls sie dort gesetzt ist, und sonst gar nicht. Das kommt
+    # ohne `${VAR:-}` aus – diese Schreibweise mit leerem Vorgabewert lehnt
+    # docker-compose v1 mit "Invalid interpolation format" ab.
     environment:
       # Im Container muss auf allen Adressen gelauscht werden, sonst kommt von
       # außen nichts an. BASE_URL bleibt intern: Unter dieser Adresse ruft der
       # Orchestrator die Agenten im selben Container auf.
-      A2A_HOST: "0.0.0.0"
-      A2A_PORT: "9999"
-      A2A_BASE_URL: "http://127.0.0.1:9999"
+      - A2A_HOST=0.0.0.0
+      - A2A_PORT=9999
+      - A2A_BASE_URL=http://127.0.0.1:9999
 
       # CPU-Betrieb: bfloat16 halbiert den Speicherbedarf des Modells von rund
       # 6 GB auf rund 3 GB. Auf sehr alten CPUs ist float32 schneller.
-      LLM_DTYPE: "bfloat16"
-      # LLM_MODEL: "Qwen/Qwen2.5-1.5B-Instruct"
+      - LLM_DTYPE=bfloat16
+      # - LLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct
 
       # Thread-Zahl an die vorhandenen Kerne anpassen. Ohne Begrenzung belegt
       # torch alle Kerne, was auf einem geteilten Server unschön ist.
-      OMP_NUM_THREADS: "4"
-      MKL_NUM_THREADS: "4"
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
 
       # Der Research-Agent baut sein Gedächtnis sonst beim Start neu auf und
       # lädt dabei von der BIBA-Webseite, OpenAlex und Google Scholar. Das
       # mitgelieferte Gedächtnis reicht zum Ausprobieren.
-      RESEARCH_INDEX_AT_STARTUP: "0"
-      # RESEARCH_MAX_STAFF: "10"
-      # RESEARCH_SOURCE: "openalex"
+      - RESEARCH_INDEX_AT_STARTUP=0
+      # - RESEARCH_MAX_STAFF=10
+      # - RESEARCH_SOURCE=openalex
 
-      # Nur nötig für gated Modelle auf Hugging Face. Token NICHT hier
-      # eintragen, sondern in einer .env-Datei neben dieser Compose-Datei:
-      #   HF_TOKEN=hf_...
-      HF_TOKEN: "${HF_TOKEN:-}"
-
-      # Nur nötig, wenn Agent H an eine echte Mediator-Instanz soll.
-      SEMANTIC_MEDIATOR_URL: "${SEMANTIC_MEDIATOR_URL:-}"
-      SEMANTIC_MEDIATOR_TOKEN: "${SEMANTIC_MEDIATOR_TOKEN:-}"
+      # Die folgenden drei werden nur durchgereicht, wenn sie im Terminal
+      # gesetzt sind, aus dem heraus `docker compose up` läuft. Kein Token
+      # hier eintragen – sonst steht es im Repo.
+      # HF_TOKEN nur für gated Modelle auf Hugging Face nötig,
+      # SEMANTIC_MEDIATOR_* nur, wenn Agent H an eine echte Instanz soll.
+      - HF_TOKEN
+      - SEMANTIC_MEDIATOR_URL
+      - SEMANTIC_MEDIATOR_TOKEN
 
     volumes:
       # Modell-Download einmalig aufheben.
@@ -66,12 +75,10 @@ services:
 
     # Das Modell braucht Arbeitsspeicher: rund 3 GB mit bfloat16, rund 6 GB mit
     # float32, dazu etwas für Python und die Agenten. Unter 4 GB wird es eng.
-    deploy:
-      resources:
-        limits:
-          memory: 6G
-        reservations:
-          memory: 4G
+    # `mem_limit`/`mem_reservation` statt `deploy.resources` – Letzteres wirkt
+    # in docker-compose v1 nicht und wird dort nur mit einer Warnung übergangen.
+    mem_limit: 6g
+    mem_reservation: 4g
 
 volumes:
   hf-cache:

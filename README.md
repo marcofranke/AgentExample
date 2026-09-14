@@ -898,6 +898,17 @@ docker compose up -d          # startet ghcr.io/marcofranke/agentexample:latest
 docker compose logs -f        # beim Hochfahren zusehen
 ```
 
+Das Compose-File läuft mit Compose v2 (`docker compose`) und mit dem alten
+`docker-compose` v1. Deshalb stehen dort `version: "2.4"` und `mem_limit`
+statt `deploy.resources` – v1 braucht das eine und ignoriert das andere.
+Compose v2 weist beim Start darauf hin, dass `version` überflüssig ist; das
+ist nur ein Hinweis, kein Fehler.
+
+`HF_TOKEN`, `SEMANTIC_MEDIATOR_URL` und `SEMANTIC_MEDIATOR_TOKEN` werden aus
+dem aufrufenden Terminal durchgereicht oder aus einer `.env`-Datei neben dem
+Compose-File gelesen. Sind sie nicht gesetzt, bleiben sie im Container leer –
+für den Standardbetrieb wird keine davon gebraucht.
+
 Ziehen ohne Compose:
 
 ```bash
@@ -953,6 +964,22 @@ hoch – Anfragen an `localhost` landen aber beim lokalen Prozess. Zu erkennen
 daran, dass `/api/status` „Not Found“ liefert, obwohl `docker compose ps`
 „healthy“ meldet. Lokalen Prozess beenden oder den Container auf einen anderen
 Host-Port legen (`"9998:9999"` in `docker-compose.yml`).
+
+**`ERROR: Invalid interpolation format ... in service "services"`**
+Auf dem Server läuft das alte `docker-compose` (v1, mit Bindestrich). Der
+Hinweis steckt im Wortlaut: v1 hält `services` für einen Servicenamen, weil der
+Schlüssel `version:` fehlte, und lehnt zusätzlich `${VAR:-}` mit leerem
+Vorgabewert ab. Das mitgelieferte `docker-compose.yml` ist inzwischen für beide
+Versionen gültig (geprüft mit v1.29.2 und v2). Bei einer älteren Kopie der
+Datei einfach die neue aus dem Repo ziehen.
+
+v1 ist seit Juli 2023 abgekündigt und kennt einige Schlüssel nicht. Auf Dauer
+lohnt der Umstieg auf Compose v2 (`docker compose` ohne Bindestrich):
+
+```bash
+sudo apt install docker-compose-plugin     # Debian/Ubuntu
+docker compose version
+```
 
 **`docker pull` verlangt einen Login**
 Das Paket auf ghcr.io ist standardmäßig privat. Entweder einmal
