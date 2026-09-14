@@ -79,6 +79,7 @@ def netz_diagnose(model_name: str) -> str:
 
     hinweise: list[str] = []
     reste: list[str] = []
+    platte_knapp = False
 
     cache = os.environ.get("HF_HOME", "")
     if cache and not os.access(cache, os.W_OK):
@@ -96,7 +97,12 @@ def netz_diagnose(model_name: str) -> str:
             )
         frei = shutil.disk_usage(cache).free / 1e9
         if frei < 5:
-            hinweise.append(f"Nur noch {frei:.1f} GB frei – das Modell braucht rund 3,5 GB.")
+            platte_knapp = True
+            hinweise.append(
+                f"Nur noch {frei:.1f} GB frei – das Modell braucht rund 3,5 GB. Das ist die "
+                "Ursache: Platz schaffen (im Container z. B. `docker system df` und "
+                "`docker image prune -a`), danach neu starten."
+            )
 
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
@@ -105,7 +111,7 @@ def netz_diagnose(model_name: str) -> str:
     anfrage = urllib.request.Request(f"https://huggingface.co/api/models/{model_name}", headers=kopf)
     try:
         with urllib.request.urlopen(anfrage, timeout=15) as antwort:
-            if not reste:
+            if not reste and not platte_knapp:
                 hinweise.append(
                     f"huggingface.co ist erreichbar (HTTP {antwort.status}) und das Modell "
                     "existiert – es liegt also nicht am Netz. Dann bleibt meist ein "
