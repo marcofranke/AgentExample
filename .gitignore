@@ -16,3 +16,9 @@ __pycache__/
 
 # Research-Agent: heruntergeladene PDFs (das Gedächtnis in memory/ ist Teil des Repos)
 downloads/
+
+# Zugangsdaten (HF_TOKEN u. a.) - gehoeren NIE ins Repo
+.env
+.env.*
+!.env.example
+*.token

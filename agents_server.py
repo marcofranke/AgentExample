@@ -11,6 +11,7 @@ Erreichbar sind die Agenten unter:
 Einen neuen Agenten anschließen = eine Zeile in AGENTEN ergänzen.
 """
 
+import os
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -31,9 +32,12 @@ from SemanticMediatorAgentExecutor import SemanticMediatorAgentExecutor
 from SubtractorAgentExecutor import SubtractorAgentExecutor
 from WeatherAgentExecutor import WeatherAgentExecutor
 
-HOST = "127.0.0.1"
-PORT = 9999
-BASE_URL = f"http://{HOST}:{PORT}"
+# Im Container muss der Server auf 0.0.0.0 lauschen, damit Anfragen von außen
+# ankommen. BASE_URL bleibt davon getrennt: Diese Adresse steht in den
+# Visitenkarten und wird vom Orchestrator im selben Prozess aufgerufen.
+HOST = os.environ.get("A2A_HOST", "127.0.0.1")
+PORT = int(os.environ.get("A2A_PORT", "9999"))
+BASE_URL = os.environ.get("A2A_BASE_URL", f"http://127.0.0.1:{PORT}").rstrip("/")
 
 # Alle Agenten, die dieser Server hosten soll. Jeder Executor hält in `.agent`
 # die Fachlogik, und die kennt ihren eigenen PATH und ihre agent_card().
@@ -69,15 +73,24 @@ def mount_agent(executor: AgentExecutor) -> list[Route]:
     return routes
 
 
-def build_app() -> Starlette:
+def build_app(extras: list = ()) -> Starlette:
+    """Baut die Anwendung aus allen Agenten und optionalen Zusatz-Bausteinen.
+
+    Ein Extra ist alles, was `routen(base_url)` anbietet – zum Beispiel die
+    Weboberfläche aus web_ui.py. Der Server kennt sie so wenig wie die Agenten.
+    """
     routes: list[Route] = []
     for executor in AGENTEN:
         routes.extend(mount_agent(executor))
-    # Agenten mit eigenem Lebenszyklus (z. B. Gedächtnis aufbauen, MCP-Server starten)
-    # bieten optional `beim_start()` und `beim_stopp()` an. Der Server ruft sie auf,
-    # ohne zu wissen, was dahintersteckt.
-    starts = [executor.agent.beim_start for executor in AGENTEN if hasattr(executor.agent, "beim_start")]
-    stopps = [executor.agent.beim_stopp for executor in AGENTEN if hasattr(executor.agent, "beim_stopp")]
+    for extra in extras:
+        routes.extend(extra.routen(BASE_URL))
+
+    # Bausteine mit eigenem Lebenszyklus (z. B. Gedächtnis aufbauen, MCP-Server
+    # starten, Modell laden) bieten optional `beim_start()` und `beim_stopp()` an.
+    # Der Server ruft sie auf, ohne zu wissen, was dahintersteckt.
+    bausteine = [executor.agent for executor in AGENTEN] + list(extras)
+    starts = [b.beim_start for b in bausteine if hasattr(b, "beim_start")]
+    stopps = [b.beim_stopp for b in bausteine if hasattr(b, "beim_stopp")]
 
     @asynccontextmanager
     async def lebenszyklus(app: Starlette):

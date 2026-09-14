@@ -22,6 +22,7 @@ Voraussetzungen:
 
 import asyncio
 import json
+import os
 import re
 import sys
 
@@ -34,7 +35,9 @@ from a2a.helpers import get_artifact_text, get_message_text, new_text_message
 from a2a.types import AgentCard, Role, SendMessageRequest, TaskState
 from a2a.utils import AGENT_CARD_WELL_KNOWN_PATH
 
-SERVER_URL = "http://127.0.0.1:9999"
+SERVER_URL = os.environ.get(
+    "A2A_BASE_URL", f"http://127.0.0.1:{os.environ.get('A2A_PORT', '9999')}"
+).rstrip("/")
 
 # Alle Agenten, die der Orchestrator kennt. Neue Agenten: einfach anhängen.
 AGENTS = [
@@ -51,7 +54,12 @@ AGENTS = [
 #   "google/gemma-2-2b-it"                  -> gated, braucht `huggingface-cli login`
 #   "HuggingFaceTB/SmolLM2-1.7B-Instruct"   -> frei
 #   "Qwen/Qwen3-1.7B"                       -> frei, braucht enable_thinking=False
-LLM_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+LLM_MODEL = os.environ.get("LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+
+# float32 braucht rund 6 GB Arbeitsspeicher für ein 1,5-B-Modell. Auf einem
+# kleinen Server halbiert LLM_DTYPE=bfloat16 den Bedarf (etwas langsamer auf
+# CPUs ohne AVX-512/AMX, sonst unauffällig).
+LLM_DTYPE = os.environ.get("LLM_DTYPE", "float32")
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +73,7 @@ class LokalesLLM:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype=torch.float32,   # CPU-sicher; auf GPU: torch.bfloat16 + device_map="auto"
+            dtype=getattr(torch, LLM_DTYPE),   # CPU-sicher; auf GPU zusätzlich device_map="auto"
         )
         self.model.eval()
         print(f"[LLM] Bereit ({sum(p.numel() for p in self.model.parameters()) / 1e9:.2f} Mrd. Parameter)")
@@ -205,25 +213,63 @@ def finde_card(entscheidung: dict, cards: list[AgentCard]) -> AgentCard:
 # ---------------------------------------------------------------------------
 # Schritt 3: Delegation – den gewählten Agenten per A2A aufrufen
 # ---------------------------------------------------------------------------
-async def frage_agent(httpx_client: httpx.AsyncClient, card: AgentCard, nutzer_text: str) -> None:
-    """Exakt derselbe Mechanismus wie in Agent A.py: Client bauen, send_message, Antwort lesen."""
+async def agent_antwort(
+    httpx_client: httpx.AsyncClient, card: AgentCard, nutzer_text: str
+) -> dict:
+    """Ruft den Agenten auf und liefert das Ergebnis als Daten – ohne Ausgabe.
+
+    Dieselben Schritte wie in Agent A.py, nur dass hier nichts gedruckt wird.
+    Deshalb kann auch die Weboberfläche (web_ui.py) darauf aufsetzen.
+    """
     config = ClientConfig(streaming=False, httpx_client=httpx_client)
     client = await create_client(agent=card, client_config=config)
 
     message = new_text_message(nutzer_text, role=Role.ROLE_USER)
     request = SendMessageRequest(message=message)
 
-    print(f"[Orchestrator] Sende an {card.name} weiter...\n")
+    antworten: list[str] = []
+    fehler = ""
     async for response in client.send_message(request):
         if not response.HasField("task"):
-            print("  ", response)
             continue
         task = response.task
         if task.status.state == TaskState.TASK_STATE_FAILED:
-            print("   FEHLER:", get_message_text(task.status.message))
+            fehler = get_message_text(task.status.message)
             continue
         for artifact in task.artifacts:
-            print(f"   Antwort von {card.name}: {get_artifact_text(artifact)}")
+            antworten.append(get_artifact_text(artifact))
+    return {"antworten": antworten, "fehler": fehler}
+
+
+async def frage_agent(httpx_client: httpx.AsyncClient, card: AgentCard, nutzer_text: str) -> None:
+    """Wie `agent_antwort`, gibt das Ergebnis aber im Terminal aus."""
+    print(f"[Orchestrator] Sende an {card.name} weiter...\n")
+    ergebnis = await agent_antwort(httpx_client, card, nutzer_text)
+    if ergebnis["fehler"]:
+        print("   FEHLER:", ergebnis["fehler"])
+    for antwort in ergebnis["antworten"]:
+        print(f"   Antwort von {card.name}: {antwort}")
+
+
+async def beantworte(
+    httpx_client: httpx.AsyncClient, llm: LokalesLLM, cards: list[AgentCard], nutzer_text: str
+) -> dict:
+    """Routing + Delegation in einem Rutsch, als Daten für die Web-API.
+
+    Enthält bewusst auch die Rohantwort des LLM: In der Oberfläche soll
+    sichtbar sein, *warum* ein Agent gewählt wurde.
+    """
+    entscheidung = await entscheide_zustaendigen_agenten(llm, nutzer_text, cards)
+    ziel_card = finde_card(entscheidung, cards)
+    ergebnis = await agent_antwort(httpx_client, ziel_card, nutzer_text)
+    return {
+        "eingabe": nutzer_text,
+        "skill_id": entscheidung["skill_id"],
+        "agent": ziel_card.name,
+        "url": entscheidung["url"],
+        "roh": entscheidung["roh"],
+        **ergebnis,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -242,23 +288,39 @@ async def verarbeite(
     await frage_agent(httpx_client, ziel_card, nutzer_text)
 
 
-async def main() -> None:
-    llm = LokalesLLM()  # einmal laden, dann für alle Anfragen wiederverwenden
+async def orchestriere(texte: list[str] | None = None, llm: LokalesLLM | None = None) -> None:
+    """Der komplette Orchestrator-Ablauf, auch von main.py aus aufrufbar.
+
+    Mit `texte`: jeden Text einmal verarbeiten. Ohne: interaktiv, bis "exit".
+    Ein bereits geladenes `llm` kann übergeben werden (main.py lädt es parallel
+    zum Serverstart), sonst wird es hier geladen.
+    """
+    # Das Laden dauert lange und ist reine CPU-Arbeit: in einen Thread auslagern,
+    # damit ein im selben Prozess laufender Server weiter Anfragen annehmen kann.
+    if llm is None:
+        llm = await asyncio.to_thread(LokalesLLM)
+
     async with httpx.AsyncClient() as httpx_client:
         cards = await lade_agent_cards(httpx_client)  # 1. Discovery
 
-        # Mit Argumenten: jeden Text einmal verarbeiten. Ohne: interaktiv, bis "exit".
-        if sys.argv[1:]:
-            for text in sys.argv[1:]:
+        if texte:
+            for text in texte:
                 print(f"\n=== Eingabe: {text}")
                 await verarbeite(httpx_client, llm, cards, text)  # 2. Routing + 3. Delegation
             return
 
         while True:
-            text = input("\nWas möchtest du senden? (exit zum Beenden) ").strip()
+            # input() blockiert; im Thread bleibt die Event-Loop (und damit der
+            # Server im selben Prozess) währenddessen ansprechbar.
+            frage = "\nWas möchtest du senden? (exit zum Beenden) "
+            text = (await asyncio.to_thread(input, frage)).strip()
             if text.lower() in ("exit", "quit", ""):
                 break
             await verarbeite(httpx_client, llm, cards, text)
+
+
+async def main() -> None:
+    await orchestriere(sys.argv[1:])
 
 
 if __name__ == "__main__":

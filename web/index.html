@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A2A-Agenten</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --rand: #dcdfe5; --text: #1c1f24;
+    --leise: #5d6672; --akzent: #2f5fd0; --akzent-bg: #e8eefc;
+    --ok: #1d7a4c; --fehler: #b3261e; --code-bg: #f0f1f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1c2027; --rand: #2e343d; --text: #e6e8ec;
+      --leise: #9aa3b0; --akzent: #7aa2f7; --akzent-bg: #232c40;
+      --ok: #56c98a; --fehler: #f2776b; --code-bg: #12151a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    background: var(--panel); border-bottom: 1px solid var(--rand);
+    padding: 14px 20px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  header .sub { color: var(--leise); font-size: 13px; }
+  .spacer { flex: 1; }
+  .status { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--leise); }
+  .punkt { width: 9px; height: 9px; border-radius: 50%; background: var(--leise); flex: none; }
+  .punkt.bereit { background: var(--ok); }
+  .punkt.laedt { background: #d9a441; animation: puls 1.2s ease-in-out infinite; }
+  .punkt.fehler { background: var(--fehler); }
+  @keyframes puls { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+
+  main { max-width: 1180px; margin: 0 auto; padding: 20px; display: grid; gap: 20px; }
+  @media (min-width: 960px) { main { grid-template-columns: 1fr 1fr; align-items: start; } }
+
+  section { background: var(--panel); border: 1px solid var(--rand); border-radius: 10px; padding: 16px 18px; }
+  section > h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--leise); margin: 0 0 14px; font-weight: 600;
+  }
+
+  .agent { border-top: 1px solid var(--rand); padding: 13px 0; }
+  .agent:first-of-type { border-top: 0; padding-top: 0; }
+  .agent-kopf { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+  .agent-name { font-weight: 640; }
+  .pfad {
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px;
+    background: var(--code-bg); border: 1px solid var(--rand); border-radius: 5px; padding: 1px 6px;
+  }
+  .agent-text { color: var(--leise); font-size: 13.5px; margin: 5px 0 0; }
+  .skill { margin: 10px 0 0 0; padding-left: 11px; border-left: 2px solid var(--akzent-bg); }
+  .skill-id {
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+    color: var(--akzent); font-weight: 600;
+  }
+  .skill-text { color: var(--leise); font-size: 13px; margin: 2px 0 0; }
+  .beispiele { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+  .beispiel {
+    font-size: 12px; background: var(--akzent-bg); color: var(--akzent);
+    border: 0; border-radius: 20px; padding: 4px 11px; cursor: pointer;
+    font-family: inherit; text-align: left;
+  }
+  .beispiel:hover { filter: brightness(.94); }
+
+  textarea {
+    width: 100%; min-height: 84px; resize: vertical; padding: 11px 12px;
+    border: 1px solid var(--rand); border-radius: 8px; background: var(--bg);
+    color: var(--text); font: inherit;
+  }
+  textarea:focus { outline: 2px solid var(--akzent); outline-offset: -1px; }
+  .zeile { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+  button.senden {
+    background: var(--akzent); color: #fff; border: 0; border-radius: 8px;
+    padding: 9px 20px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button.senden:disabled { opacity: .5; cursor: not-allowed; }
+  button.neu {
+    background: transparent; color: var(--leise); border: 1px solid var(--rand);
+    border-radius: 7px; padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .hinweis { color: var(--leise); font-size: 13px; }
+
+  .ergebnis { margin-top: 16px; border-top: 1px solid var(--rand); padding-top: 14px; }
+  .weg {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 13px; color: var(--leise); margin-bottom: 11px;
+  }
+  .marke {
+    background: var(--akzent-bg); color: var(--akzent); border-radius: 5px;
+    padding: 2px 8px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; font-weight: 600;
+  }
+  .antwort {
+    background: var(--code-bg); border: 1px solid var(--rand); border-left: 3px solid var(--ok);
+    border-radius: 7px; padding: 11px 13px; white-space: pre-wrap; word-break: break-word;
+  }
+  .antwort.schlecht { border-left-color: var(--fehler); }
+  details { margin-top: 11px; }
+  summary { cursor: pointer; color: var(--leise); font-size: 12.5px; }
+  details pre {
+    background: var(--code-bg); border: 1px solid var(--rand); border-radius: 7px;
+    padding: 10px; margin: 8px 0 0; overflow-x: auto; font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>A2A-Agenten</h1>
+    <div class="sub">Discovery über die Visitenkarten &middot; Anfragen über den LLM-Orchestrator</div>
+  </div>
+  <div class="spacer"></div>
+  <div class="status"><span class="punkt" id="punkt"></span><span id="statusText">Status wird geladen …</span></div>
+</header>
+
+<main>
+  <section>
+    <h2>Gefundene Agenten <button class="neu" id="neuLaden" type="button">neu laden</button></h2>
+    <div id="agenten"><p class="hinweis">Discovery läuft …</p></div>
+  </section>
+
+  <section>
+    <h2>Anfrage an den Orchestrator</h2>
+    <textarea id="eingabe" placeholder="z. B. Was ist 20 minus 8? &#10;Das Sprachmodell wählt anhand der Skill-Beschreibungen selbst den passenden Agenten aus."></textarea>
+    <div class="zeile">
+      <button class="senden" id="senden" type="button">Senden</button>
+      <span class="hinweis" id="queryHinweis">Strg + Enter sendet ebenfalls</span>
+    </div>
+    <div id="ergebnis"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let llmBereit = false;
+
+async function holen(pfad, optionen) {
+  const antwort = await fetch(pfad, optionen);
+  const daten = await antwort.json().catch(() => ({ fehler: "Keine gültige JSON-Antwort vom Server." }));
+  return { ok: antwort.ok, daten };
+}
+
+async function statusLaden() {
+  const { ok, daten } = await holen("api/status");
+  const punkt = $("punkt");
+  if (!ok) { punkt.className = "punkt fehler"; $("statusText").textContent = "Server antwortet nicht"; return; }
+  llmBereit = daten.llm_bereit;
+  if (daten.llm_fehler) {
+    punkt.className = "punkt fehler";
+    $("statusText").textContent = "Modell nicht ladbar: " + daten.llm_fehler;
+  } else if (llmBereit) {
+    punkt.className = "punkt bereit";
+    $("statusText").textContent = "Modell bereit: " + daten.modell;
+  } else {
+    punkt.className = "punkt laedt";
+    $("statusText").textContent = "Modell wird geladen (" + daten.modell + ") …";
+    setTimeout(statusLaden, 3000);
+  }
+  $("senden").disabled = !llmBereit;
+  $("queryHinweis").textContent = llmBereit
+    ? "Strg + Enter sendet ebenfalls"
+    : "Warte, bis das Sprachmodell geladen ist …";
+}
+
+function agentHtml(a) {
+  const skills = a.skills.map((s) => `
+    <div class="skill">
+      <span class="skill-id">${esc(s.id)}</span> &middot; ${esc(s.name)}
+      <p class="skill-text">${esc(s.beschreibung)}</p>
+      <div class="beispiele">${s.beispiele.map((b) => `<button class="beispiel" type="button" data-text="${esc(b)}">${esc(b)}</button>`).join("")}</div>
+    </div>`).join("");
+  return `<div class="agent">
+    <div class="agent-kopf"><span class="agent-name">${esc(a.name)}</span><span class="pfad">${esc(a.pfad)}</span></div>
+    <p class="agent-text">${esc(a.beschreibung)}</p>${skills}
+  </div>`;
+}
+
+async function agentenLaden() {
+  $("agenten").innerHTML = '<p class="hinweis">Discovery läuft …</p>';
+  const { ok, daten } = await holen("api/agents");
+  if (!ok) { $("agenten").innerHTML = `<p class="hinweis">Discovery fehlgeschlagen: ${esc(daten.fehler)}</p>`; return; }
+  const fehler = (daten.fehler || []).map((f) => `<p class="hinweis">Nicht erreichbar: ${esc(f)}</p>`).join("");
+  $("agenten").innerHTML = daten.agenten.map(agentHtml).join("") + fehler;
+  document.querySelectorAll(".beispiel").forEach((b) =>
+    b.addEventListener("click", () => { $("eingabe").value = b.dataset.text; $("eingabe").focus(); }));
+}
+
+async function senden() {
+  const text = $("eingabe").value.trim();
+  if (!text) return;
+  $("senden").disabled = true;
+  $("ergebnis").innerHTML = '<div class="ergebnis"><p class="hinweis">Das Modell wählt einen Agenten …</p></div>';
+
+  const { ok, daten } = await holen("api/query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  $("senden").disabled = !llmBereit;
+
+  if (!ok) {
+    $("ergebnis").innerHTML = `<div class="ergebnis"><div class="antwort schlecht">${esc(daten.fehler)}</div></div>`;
+    return;
+  }
+  const schlecht = daten.fehler ? " schlecht" : "";
+  const inhalt = daten.fehler || daten.antworten.join("\n\n") || "(keine Antwort erhalten)";
+  $("ergebnis").innerHTML = `<div class="ergebnis">
+    <div class="weg">
+      Anfrage <span class="marke">${esc(daten.skill_id)}</span> → <strong>${esc(daten.agent)}</strong>
+    </div>
+    <div class="antwort${schlecht}">${esc(inhalt)}</div>
+    <details><summary>Wie kam die Entscheidung zustande?</summary>
+      <pre>Rohantwort des LLM: ${esc(daten.roh)}\nZiel-URL:           ${esc(daten.url)}</pre>
+    </details>
+  </div>`;
+}
+
+$("senden").addEventListener("click", senden);
+$("neuLaden").addEventListener("click", agentenLaden);
+$("eingabe").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) senden();
+});
+statusLaden();
+agentenLaden();
+</script>
+</body>
+</html>

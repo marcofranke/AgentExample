@@ -1,0 +1,79 @@
+# A2A-Agenten mit Weboberfläche auf einem Server ohne GPU.
+#
+#   docker compose up -d        starten
+#   docker compose logs -f      beim Hochfahren zusehen
+#   docker compose down         stoppen
+#
+# Danach: http://<server>:9999/
+#
+# Der erste Start dauert einige Minuten, weil das Sprachmodell (~3 GB)
+# heruntergeladen wird. Es landet im Volume `hf-cache` und wird danach
+# wiederverwendet – auch über `docker compose down` hinaus.
+
+services:
+  a2a:
+    image: ghcr.io/marcofranke/agentexample:latest
+    # Zum lokalen Bauen statt Ziehen die nächste Zeile einkommentieren:
+    # build: .
+    container_name: a2a-agents
+    restart: unless-stopped
+
+    ports:
+      - "9999:9999"
+
+    environment:
+      # Im Container muss auf allen Adressen gelauscht werden, sonst kommt von
+      # außen nichts an. BASE_URL bleibt intern: Unter dieser Adresse ruft der
+      # Orchestrator die Agenten im selben Container auf.
+      A2A_HOST: "0.0.0.0"
+      A2A_PORT: "9999"
+      A2A_BASE_URL: "http://127.0.0.1:9999"
+
+      # CPU-Betrieb: bfloat16 halbiert den Speicherbedarf des Modells von rund
+      # 6 GB auf rund 3 GB. Auf sehr alten CPUs ist float32 schneller.
+      LLM_DTYPE: "bfloat16"
+      # LLM_MODEL: "Qwen/Qwen2.5-1.5B-Instruct"
+
+      # Thread-Zahl an die vorhandenen Kerne anpassen. Ohne Begrenzung belegt
+      # torch alle Kerne, was auf einem geteilten Server unschön ist.
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+
+      # Der Research-Agent baut sein Gedächtnis sonst beim Start neu auf und
+      # lädt dabei von der BIBA-Webseite, OpenAlex und Google Scholar. Das
+      # mitgelieferte Gedächtnis reicht zum Ausprobieren.
+      RESEARCH_INDEX_AT_STARTUP: "0"
+      # RESEARCH_MAX_STAFF: "10"
+      # RESEARCH_SOURCE: "openalex"
+
+      # Nur nötig für gated Modelle auf Hugging Face. Token NICHT hier
+      # eintragen, sondern in einer .env-Datei neben dieser Compose-Datei:
+      #   HF_TOKEN=hf_...
+      HF_TOKEN: "${HF_TOKEN:-}"
+
+      # Nur nötig, wenn Agent H an eine echte Mediator-Instanz soll.
+      SEMANTIC_MEDIATOR_URL: "${SEMANTIC_MEDIATOR_URL:-}"
+      SEMANTIC_MEDIATOR_TOKEN: "${SEMANTIC_MEDIATOR_TOKEN:-}"
+
+    volumes:
+      # Modell-Download einmalig aufheben.
+      - hf-cache:/cache/huggingface
+      # Gedächtnis des Research-Agenten über Neustarts hinweg behalten. Beim
+      # ersten Start füllt Docker das Volume mit dem Stand aus dem Image.
+      - research-memory:/app/memory
+      # PDFs, die der Research-Agent zieht.
+      - research-downloads:/app/downloads
+
+    # Das Modell braucht Arbeitsspeicher: rund 3 GB mit bfloat16, rund 6 GB mit
+    # float32, dazu etwas für Python und die Agenten. Unter 4 GB wird es eng.
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+        reservations:
+          memory: 4G
+
+volumes:
+  hf-cache:
+  research-memory:
+  research-downloads:

@@ -22,13 +22,15 @@ zwei Stellen bewusst ab:
 
 1. [Die Idee hinter A2A in 60 Sekunden](#1-die-idee-hinter-a2a-in-60-sekunden)
 2. [Voraussetzungen und Installation](#2-voraussetzungen-und-installation)
+   * [Schnellstart: alles mit einem Befehl](#schnellstart-alles-mit-einem-befehl)
 3. [Projektstruktur](#3-projektstruktur)
 4. [Teil 1: Agenten bereitstellen und ansprechen](#4-teil-1-agenten-bereitstellen-und-ansprechen)
 5. [Teil 2: Der LLM-Orchestrator](#5-teil-2-der-llm-orchestrator)
 6. [Teil 3: Agenten mit externen Diensten](#6-teil-3-agenten-mit-externen-diensten)
 7. [Teil 4: Research-Agent mit MCP-Server und Gedächtnis](#7-teil-4-research-agent-mit-mcp-server-und-gedächtnis)
 8. [Übung: Einen eigenen Agenten anschließen](#8-übung-einen-eigenen-agenten-anschließen)
-9. [Fehlersuche](#9-fehlersuche)
+9. [Weboberfläche und Betrieb im Container](#9-weboberfläche-und-betrieb-im-container)
+10. [Fehlersuche](#10-fehlersuche)
 
 ---
 
@@ -94,12 +96,62 @@ nutzen `httpx`, das mit dem A2A-SDK bereits installiert ist. Für Teil 4 muss
 Auf Windows ohne GPU installiert `pip install torch` automatisch die CPU-Variante.
 Wer eine NVIDIA-GPU nutzen möchte, folgt der Anleitung auf https://pytorch.org.
 
+### Schnellstart: alles mit einem Befehl
+
+Das Tutorial erklärt Server und Orchestrator getrennt, weil man so besser
+sieht, wer mit wem spricht. Wer beides einfach nur laufen lassen will, startet
+`main.py` – die Datei fährt **Server und Orchestrator in einem Prozess** hoch:
+
+```bash
+python main.py                                  # interaktiv
+python main.py "Wie ist das Wetter in Bremen?"  # Anfragen direkt übergeben
+```
+
+```
+[Server] Agent B – Greeter        -> http://127.0.0.1:9999/greeter  (Skill: greet)
+...
+[Research] MCP-Server verbunden, Tools: list_biba_staff, search_publications, ...
+
+[main] Server bereit unter http://127.0.0.1:9999
+
+[LLM] Bereit (1.54 Mrd. Parameter)
+[Orchestrator] Gefunden: Agent B – Greeter – Skills: greet
+...
+Was möchtest du senden? (exit zum Beenden) Bitte addiere 17 und 25
+
+[Orchestrator] LLM-Rohantwort: '{"skill_id": "add"}'
+[Orchestrator] Entscheidung: skill_id=add -> http://127.0.0.1:9999/adder
+   Antwort von Agent C – Adder: 17 + 25 = 42
+```
+
+`exit` beendet den Orchestrator und fährt danach den Server sauber herunter
+(inklusive des MCP-Kindprozesses des Research-Agenten).
+
+Zwei Dinge sind dabei anders als beim Start in zwei Terminals:
+
+* **Die Ausgaben mischen sich.** Server-Logs, die Fortschrittsmeldungen der
+  Indexierung und die Eingabeaufforderung landen in demselben Fenster. Für
+  einen ruhigen Start hilft `set RESEARCH_INDEX_AT_STARTUP=0` (siehe
+  [Konfiguration](#konfiguration)).
+* **Port 9999 darf nicht belegt sein.** Läuft in einem anderen Terminal noch
+  ein `python agents_server.py`, bricht `main.py` mit einem entsprechenden
+  Hinweis ab.
+
+Zum Verstehen der Bausteine sind die Einzelstarts aus Teil 1 und 2 weiterhin
+der bessere Weg – sie funktionieren unverändert.
+
 ---
 
 ## 3. Projektstruktur
 
 ```
 AgentExample/
+├── main.py                    # Schnellstart: Server UND Orchestrator in einem Prozess
+├── web_server.py              # Betrieb: Server + Orchestrator + Weboberfläche
+├── web_ui.py                  # Die Web-Routen (/, /api/agents, /api/query)
+├── web/index.html             # Die Seite selbst
+├── Dockerfile                 # CPU-Image, ohne CUDA, ohne eingebackenes Modell
+├── docker-compose.yml         # Betrieb auf einem Server ohne GPU
 ├── agents_server.py           # Startet EINEN Server, der alle Agenten hostet
 ├── Agent A.py                 # Einfacher Client: ruft Greeter und Adder direkt auf
 ├── agent_c_orchestrator.py    # LLM-Orchestrator: lässt ein lokales LLM routen
@@ -125,7 +177,6 @@ AgentExample/
 ├── downloads/                 # (wird erzeugt) heruntergeladene PDFs
 │
 ├── requirements.txt           # Alle Pakete für Teil 1 bis 3
-├── main.py                    # PyCharm-Beispieldatei, nicht Teil des Tutorials
 └── A2A-Tutorial-Orchestrator-LLM.pdf   # Das Original-Tutorial
 ```
 
@@ -298,6 +349,9 @@ python agent_c_orchestrator.py
 
 # Oder: Anfragen direkt als Argumente übergeben
 python agent_c_orchestrator.py "Was ist 20 minus 8?" "Addiere 3 und 4" "Hallo!"
+
+# Ohne separaten Server: main.py startet beides zusammen (siehe Schnellstart)
+python main.py "Was ist 20 minus 8?"
 ```
 
 Beim **ersten Start** wird das Modell (ca. 3 GB) von Hugging Face
@@ -370,6 +424,37 @@ Die Klasse `LokalesLLM` lädt das Modell einmal und hält es im Speicher.
   `from_pretrained` setzen.
 
 Alternative Modelle stehen als Kommentar über `LLM_MODEL` in der Datei.
+
+### Beides in einem Prozess: `main.py`
+
+Server und Orchestrator sind beide asyncio-Anwendungen – `uvicorn.Server.serve()`
+ist eine Koroutine wie jede andere. Deshalb können sie sich **eine Event-Loop
+teilen**: Der Server läuft als Hintergrund-Task, der Orchestrator im Vordergrund.
+
+```python
+server = uvicorn.Server(uvicorn.Config(build_app(), host=HOST, port=PORT))
+task = asyncio.create_task(server.serve())
+while not server.started:          # warten, sonst kommt die Discovery zu früh
+    await asyncio.sleep(0.05)
+await orchestriere(sys.argv[1:], llm=llm)
+server.should_exit = True          # Lifespan läuft -> beim_stopp() -> MCP-Prozess endet
+await task
+```
+
+Entscheidend ist, dass **nichts Blockierendes in der Event-Loop landet**. Sonst
+steht der Server still, sobald der Orchestrator arbeitet. Drei Stellen sind
+deshalb in Threads ausgelagert:
+
+| Was blockiert | Lösung |
+|---------------|--------|
+| Modell laden (Minuten) | `asyncio.to_thread(LokalesLLM)` – läuft parallel zum Serverstart |
+| Generierung | `asyncio.to_thread(llm.generate, ...)` (war schon vorher so) |
+| `input()` (wartet unbegrenzt) | `asyncio.to_thread(input, frage)` |
+
+Besonders die letzte Zeile ist wichtig: Ohne sie würde der Server jede Anfrage
+verweigern, solange die Eingabeaufforderung auf eine Eingabe wartet – und das
+ist ja fast immer. `agent_c_orchestrator.py` stellt dafür die Funktion
+`orchestriere(texte, llm)` bereit; `main()` ist nur noch ein Aufruf davon.
 
 ### Probier es aus
 
@@ -744,16 +829,127 @@ Die Skill-Beschreibung ist die einzige Information, die das Routing steuert.
 
 ---
 
-## 9. Fehlersuche
+## 9. Weboberfläche und Betrieb im Container
+
+Bis hierher lief alles im Terminal. `web_server.py` stellt dieselben Agenten
+zusätzlich als **Webanwendung** bereit:
+
+```bash
+python web_server.py        # dann http://127.0.0.1:9999/ öffnen
+```
+
+Damit gibt es drei Starter, die aufeinander aufbauen:
+
+| Starter | Was läuft | Wofür |
+|---------|-----------|-------|
+| `agents_server.py` | nur die Agenten, kein LLM | Teil 1, schnell und schlank |
+| `main.py` | Agenten + Orchestrator im Terminal | Teil 2, zum Mitlesen |
+| `web_server.py` | Agenten + Orchestrator + Oberfläche | Betrieb, Vorführung |
+
+### Die Oberfläche
+
+Links die **Discovery**: Jeder gefundene Agent mit Beschreibung, Pfad und seinen
+Skills. Zu jedem Skill stehen die `examples` aus der AgentCard als anklickbare
+Knöpfe – ein Klick füllt das Eingabefeld. Damit sieht man unmittelbar, womit das
+Routing eigentlich arbeitet.
+
+Rechts die **Anfrage**: Text eingeben, senden, und man bekommt nicht nur die
+Antwort, sondern auch den Weg dahin – welche `skill_id` das Modell gewählt hat,
+welcher Agent das war, und aufklappbar die Rohantwort des LLM.
+
+Die Oberfläche liest die Agenten **nicht** intern aus, sondern holt die
+Visitenkarten über HTTP von den eigenen `/.well-known/agent-card.json`-Routen.
+Sie sieht die Agenten also genauso wie jeder fremde Client.
+
+### Die Endpunkte
+
+| Route | Zweck |
+|-------|-------|
+| `GET /` | die Seite |
+| `GET /api/status` | Ist das Sprachmodell schon geladen? Die Seite fragt das, bis es so weit ist |
+| `GET /api/agents` | Discovery: alle Visitenkarten mit Skills (`?neu=1` erzwingt erneutes Holen) |
+| `POST /api/query` | `{"text": "..."}` → Routing durch das LLM, Antwort des Agenten |
+
+```bash
+curl -s -X POST http://127.0.0.1:9999/api/query \
+  -H "Content-Type: application/json" -d '{"text":"Was ist 20 minus 8?"}'
+```
+
+```json
+{"eingabe":"Was ist 20 minus 8?","skill_id":"subtract","agent":"Agent E – Subtractor",
+ "url":"http://127.0.0.1:9999/subtractor","roh":"{\"skill_id\": \"subtract\"}",
+ "antworten":["20 - 8 = 12"],"fehler":""}
+```
+
+Technisch ist `WebUI` in `web_ui.py` ein **Extra** für `build_app(extras=[...])`:
+Es bringt seine Routen selbst mit und hat wie der Research-Agent `beim_start()`
+und `beim_stopp()` – der Server weiß über die Oberfläche so wenig wie über die
+Agenten. Das Modell lädt dabei im Hintergrund, damit die Seite sofort da ist;
+solange zeigt der Punkt oben rechts „wird geladen“.
+
+### Docker
+
+Das Image enthält die Agenten und die Oberfläche, **nicht** das Sprachmodell –
+das wären 3 GB extra im Image. Es wird beim ersten Start geladen und liegt
+danach im Volume `hf-cache`.
+
+```bash
+docker compose up -d          # startet ghcr.io/marcofranke/agentexample:latest
+docker compose logs -f        # beim Hochfahren zusehen
+```
+
+Ziehen ohne Compose:
+
+```bash
+docker pull ghcr.io/marcofranke/agentexample:latest
+docker run -d -p 9999:9999 -e LLM_DTYPE=bfloat16 \
+  -v hf-cache:/cache/huggingface ghcr.io/marcofranke/agentexample:latest
+```
+
+Was für den Betrieb ohne GPU wichtig ist:
+
+* **Kein CUDA.** Das Image installiert `torch` aus dem CPU-Index von PyTorch.
+  Sonst kämen mehrere Gigabyte CUDA-Pakete mit, die ohne GPU nutzlos sind.
+* **Arbeitsspeicher.** Rechnerisch braucht das 1,5-B-Modell mit `float32` rund
+  6 GB und mit `LLM_DTYPE=bfloat16` rund 3 GB. Gemessen wurden im laufenden
+  Container mit `bfloat16` rund 1,2 GB – die Gewichte liegen speicherabgebildet
+  im Dateicache und werden nur bei Bedarf eingelagert. Das Compose-File setzt
+  `bfloat16` und reserviert 4 GB; damit ist man auf der sicheren Seite.
+* **Antwortzeit.** Eine Anfrage dauert auf CPU rund 15 Sekunden, fast
+  ausschließlich für die Routing-Entscheidung des LLM. Die Agenten selbst
+  antworten in Millisekunden.
+* **Adressen.** `A2A_HOST=0.0.0.0` lässt den Server von außen erreichbar sein.
+  `A2A_BASE_URL` bleibt davon getrennt auf `http://127.0.0.1:9999`, denn unter
+  dieser Adresse ruft der Orchestrator die Agenten *im selben Container* auf.
+  Wer will, dass auch externe Clients die URLs aus den Visitenkarten nutzen
+  können, setzt `A2A_BASE_URL` auf die öffentliche Adresse.
+* **Kerne.** `OMP_NUM_THREADS` begrenzt torch; ohne das belegt es alle Kerne.
+* **Erster Start dauert.** Modell-Download. `docker compose logs -f` zeigt den
+  Fortschritt, und `/api/status` sagt, wann es so weit ist.
+
+---
+
+## 10. Fehlersuche
 
 **`ConnectError` oder `Connection refused` beim Start von Agent A oder Orchestrator**
 Der Server läuft nicht. Starte zuerst `python agents_server.py` in einem
-eigenen Terminal und lasse es offen.
+eigenen Terminal und lasse es offen – oder nimm `python main.py`, das beides
+zusammen startet.
 
 **`Address already in use` beim Serverstart**
 Port 9999 ist belegt, meist durch einen noch laufenden alten Server. Beende
 ihn oder ändere `PORT` in `agents_server.py`. Dann auch `SERVER_URL` in
 `Agent A.py` und `agent_c_orchestrator.py` anpassen.
+
+**`main.py`: `Der Server konnte Port 9999 nicht belegen`**
+Dieselbe Ursache: In einem anderen Terminal läuft noch ein `agents_server.py`
+oder ein früheres `main.py`. Beenden und `main.py` neu starten. `main.py`
+braucht den Port für sich, weil es den Server selbst mitstartet.
+
+**`main.py`: Die Eingabeaufforderung geht in Log-Zeilen unter**
+Server und Orchestrator teilen sich ein Fenster, und der Research-Agent meldet
+beim Indexieren jede Person. Mit `set RESEARCH_INDEX_AT_STARTUP=0` bleibt es
+ruhig, oder starte Server und Orchestrator wie in Teil 1 und 2 getrennt.
 
 **Erster Start des Orchestrators dauert sehr lange**
 Das Modell wird heruntergeladen (ca. 3 GB). Das passiert nur einmal.

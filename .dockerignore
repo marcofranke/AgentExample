@@ -1,0 +1,26 @@
+# Alles, was nicht ins Image gehoert
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Zugangsdaten bleiben draussen - sie kommen zur Laufzeit als Umgebungsvariable
+.env
+.env.*
+*.token
+
+# Grosse oder erzeugte Dateien
+downloads/
+*.pdf
+*.safetensors
+*.bin
+
+# Doku wird im Image nicht gebraucht
+README.md
+CLAUDE.md
+LICENSE
+docker-compose.yml
