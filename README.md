@@ -946,6 +946,20 @@ Dieselbe Ursache: In einem anderen Terminal läuft noch ein `agents_server.py`
 oder ein früheres `main.py`. Beenden und `main.py` neu starten. `main.py`
 braucht den Port für sich, weil es den Server selbst mitstartet.
 
+**Container läuft „healthy“, aber `http://127.0.0.1:9999/` zeigt etwas anderes**
+Auf dem Host läuft noch ein eigener `agents_server.py` oder `main.py` auf
+Port 9999. Der Container bindet an `0.0.0.0:9999` und kommt damit trotzdem
+hoch – Anfragen an `localhost` landen aber beim lokalen Prozess. Zu erkennen
+daran, dass `/api/status` „Not Found“ liefert, obwohl `docker compose ps`
+„healthy“ meldet. Lokalen Prozess beenden oder den Container auf einen anderen
+Host-Port legen (`"9998:9999"` in `docker-compose.yml`).
+
+**`docker pull` verlangt einen Login**
+Das Paket auf ghcr.io ist standardmäßig privat. Entweder einmal
+`docker login ghcr.io` auf dem Server, oder das Paket auf GitHub unter
+*Packages → agentexample → Package settings → Change visibility* öffentlich
+schalten.
+
 **`main.py`: Die Eingabeaufforderung geht in Log-Zeilen unter**
 Server und Orchestrator teilen sich ein Fenster, und der Research-Agent meldet
 beim Indexieren jede Person. Mit `set RESEARCH_INDEX_AT_STARTUP=0` bleibt es
