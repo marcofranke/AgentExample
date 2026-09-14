@@ -981,6 +981,35 @@ sudo apt install docker-compose-plugin     # Debian/Ubuntu
 docker compose version
 ```
 
+**`ERROR: could not find an available, non-overlapping IPv4 address pool`**
+Kein Fehler des Stacks, sondern des Docker-Daemons: Für ein weiteres Netzwerk
+ist kein freier privater Adressbereich mehr übrig. Typisch auf Servern, auf
+denen viele Compose-Projekte laufen – jedes bringt ein eigenes Netz mit, und
+die Standardbereiche (`172.17.0.0/16` bis `172.31.0.0/16`) sind endlich. Ein
+VPN oder eine Firmenroute im selben Bereich kann ebenfalls die Ursache sein.
+
+```bash
+docker network ls                 # wie viele sind es?
+docker network prune              # ungenutzte entfernen - hilft meistens
+```
+
+Reicht das nicht, bekommt Docker in `/etc/docker/daemon.json` weitere Bereiche
+zugewiesen (wirkt auf den ganzen Server und braucht einen Neustart des Dienstes):
+
+```json
+{ "default-address-pools": [ { "base": "10.201.0.0/16", "size": 24 } ] }
+```
+
+```bash
+sudo systemctl restart docker
+```
+
+Ohne Eingriff am Daemon geht es auch: In `docker-compose.yml` die Zeile
+`network_mode: "bridge"` einkommentieren. Der Container hängt sich dann an die
+vorhandene Standard-Bridge, und Compose legt gar kein Netz mehr an (geprüft:
+die Netzwerkliste bleibt unverändert). Bei diesem Stack aus einem einzigen
+Dienst ändert das sonst nichts – die Portfreigabe funktioniert genauso.
+
 **`docker pull` verlangt einen Login**
 Das Paket auf ghcr.io ist standardmäßig privat. Entweder einmal
 `docker login ghcr.io` auf dem Server, oder das Paket auf GitHub unter

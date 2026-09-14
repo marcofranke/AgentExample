@@ -26,6 +26,14 @@ services:
     ports:
       - "9999:9999"
 
+    # Compose legt sonst ein eigenes Netz an. Auf Servern, auf denen schon viele
+    # Compose-Projekte laufen, gehen Docker irgendwann die privaten Adressbereiche
+    # aus ("could not find an available, non-overlapping IPv4 address pool").
+    # Dann hilft `docker network prune` – oder die nächste Zeile: Der Container
+    # hängt sich an die vorhandene Standard-Bridge, ein neues Netz entfällt.
+    # Für diesen Stack aus genau einem Dienst ist das unbedenklich.
+    # network_mode: "bridge"
+
     # Listenform statt Zuordnung: Ein Eintrag ohne "=" reicht die Variable vom
     # Host durch, falls sie dort gesetzt ist, und sonst gar nicht. Das kommt
     # ohne `${VAR:-}` aus – diese Schreibweise mit leerem Vorgabewert lehnt
