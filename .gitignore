@@ -1,0 +1,15 @@
+# Virtuelle Umgebung
+.venv/
+venv/
+
+# Python-Cache
+__pycache__/
+*.py[cod]
+
+# IDE
+.idea/
+.vscode/
+
+# Hugging-Face / Torch Downloads, falls lokal abgelegt
+*.safetensors
+*.bin
