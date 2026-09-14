@@ -11,6 +11,8 @@ Erreichbar sind die Agenten unter:
 Einen neuen Agenten anschließen = eine Zeile in AGENTEN ergänzen.
 """
 
+from contextlib import asynccontextmanager
+
 import uvicorn
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -24,6 +26,7 @@ from a2a.utils import AGENT_CARD_WELL_KNOWN_PATH
 from AdderAgentExecutor import AdderAgentExecutor
 from GreenAgentExecuter import GreeterAgentExecutor
 from OntologySearchAgentExecutor import OntologySearchAgentExecutor
+from ResearchAgentExecutor import ResearchAgentExecutor
 from SemanticMediatorAgentExecutor import SemanticMediatorAgentExecutor
 from SubtractorAgentExecutor import SubtractorAgentExecutor
 from WeatherAgentExecutor import WeatherAgentExecutor
@@ -41,6 +44,7 @@ AGENTEN: list[AgentExecutor] = [
     WeatherAgentExecutor(),
     OntologySearchAgentExecutor(),
     SemanticMediatorAgentExecutor(),
+    ResearchAgentExecutor(),
 ]
 
 
@@ -69,7 +73,21 @@ def build_app() -> Starlette:
     routes: list[Route] = []
     for executor in AGENTEN:
         routes.extend(mount_agent(executor))
-    return Starlette(routes=routes)
+    # Agenten mit eigenem Lebenszyklus (z. B. Gedächtnis aufbauen, MCP-Server starten)
+    # bieten optional `beim_start()` und `beim_stopp()` an. Der Server ruft sie auf,
+    # ohne zu wissen, was dahintersteckt.
+    starts = [executor.agent.beim_start for executor in AGENTEN if hasattr(executor.agent, "beim_start")]
+    stopps = [executor.agent.beim_stopp for executor in AGENTEN if hasattr(executor.agent, "beim_stopp")]
+
+    @asynccontextmanager
+    async def lebenszyklus(app: Starlette):
+        for start in starts:
+            await start()
+        yield
+        for stopp in stopps:
+            await stopp()
+
+    return Starlette(routes=routes, lifespan=lebenszyklus)
 
 
 if __name__ == "__main__":

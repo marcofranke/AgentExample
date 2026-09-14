@@ -13,3 +13,7 @@ __pycache__/
 # Hugging-Face / Torch Downloads, falls lokal abgelegt
 *.safetensors
 *.bin
+
+# Research-Agent: heruntergeladene PDFs und Gedächtnis
+downloads/
+memory/

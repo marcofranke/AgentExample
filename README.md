@@ -1,13 +1,14 @@
 # A2A-Tutorial: Agenten, die miteinander reden
 
 Dieses Projekt zeigt Schritt für Schritt, wie mehrere Agenten über das
-**A2A-Protokoll (Agent-to-Agent)** zusammenarbeiten. Es besteht aus drei Teilen:
+**A2A-Protokoll (Agent-to-Agent)** zusammenarbeiten. Es besteht aus vier Teilen:
 
 | Teil | Was passiert | Dateien |
 |------|--------------|---------|
 | 1 | Drei einfache Agenten laufen auf einem Server. Ein Client (Agent A) findet sie über ihre „Visitenkarte“ und schickt ihnen Nachrichten. | `agents_server.py`, `Agent A.py`, `*Agent.py`, `*AgentExecutor.py` |
 | 2 | Ein Orchestrator (Agent C) hat selbst keine Fachlogik. Ein **lokales LLM** entscheidet anhand der Skill-Beschreibungen, welcher Agent zuständig ist, und der Orchestrator delegiert die Anfrage per A2A. | `agent_c_orchestrator.py` |
 | 3 | Drei Agenten, die **externe Dienste** anbinden: aktuelles Wetter (Open-Meteo), Ontologie-Suche (OLS4, LOV) und der **Semantische Mediator des BIBA**. | `WeatherAgent.py`, `OntologySearchAgent.py`, `SemanticMediatorAgent.py` |
+| 4 | Ein **komplexer Agent mit MCP-Server und Gedächtnis**: kennt die BIBA-Mitarbeitenden und ihre Veröffentlichungen, schlägt Reviewer vor, erstellt Forschungsprofile und beantwortet Fragen zu Personen. | `biba_mcp_server.py`, `ResearchAgent.py` |
 
 Das Tutorial folgt der PDF `A2A-Tutorial-Orchestrator-LLM.pdf`, weicht aber an
 zwei Stellen bewusst ab:
@@ -25,8 +26,9 @@ zwei Stellen bewusst ab:
 4. [Teil 1: Agenten bereitstellen und ansprechen](#4-teil-1-agenten-bereitstellen-und-ansprechen)
 5. [Teil 2: Der LLM-Orchestrator](#5-teil-2-der-llm-orchestrator)
 6. [Teil 3: Agenten mit externen Diensten](#6-teil-3-agenten-mit-externen-diensten)
-7. [Übung: Einen eigenen Agenten anschließen](#7-übung-einen-eigenen-agenten-anschließen)
-8. [Fehlersuche](#8-fehlersuche)
+7. [Teil 4: Research-Agent mit MCP-Server und Gedächtnis](#7-teil-4-research-agent-mit-mcp-server-und-gedächtnis)
+8. [Übung: Einen eigenen Agenten anschließen](#8-übung-einen-eigenen-agenten-anschließen)
+9. [Fehlersuche](#9-fehlersuche)
 
 ---
 
@@ -64,7 +66,7 @@ Client                          Server (Agent)
 * Python 3.12 oder neuer (das Projekt wurde mit 3.14 entwickelt)
 * Etwa 3 GB freier Speicherplatz für das lokale Sprachmodell (nur Teil 2)
 * Keine GPU nötig, das Modell läuft auf der CPU
-* Internetzugang für die Agenten aus Teil 3 (Wetter, Ontologie-Suche)
+* Internetzugang für die Agenten aus Teil 3 und 4 (Wetter, Ontologie-Suche, Publikationen)
 
 ```bash
 # 1. Virtuelle Umgebung anlegen und aktivieren
@@ -78,12 +80,16 @@ pip install a2a-sdk httpx starlette uvicorn
 # 3. Zusätzliche Pakete für Teil 2 (lokales LLM)
 pip install torch transformers accelerate
 
+# 4. Zusätzliche Pakete für Teil 4 (MCP-Server, PDF, Webseiten, Google Scholar)
+pip install "mcp>=2" pypdf beautifulsoup4 scholarly "bibtexparser<2"
+
 # Oder alles auf einmal:
 pip install -r requirements.txt
 ```
 
 Teil 3 braucht keine weiteren Pakete. Der Wetter-Agent und die Ontologie-Suche
-nutzen `httpx`, das mit dem A2A-SDK bereits installiert ist.
+nutzen `httpx`, das mit dem A2A-SDK bereits installiert ist. Für Teil 4 muss
+`bibtexparser` in Version 1 bleiben, weil `scholarly` mit Version 2 nicht startet.
 
 Auf Windows ohne GPU installiert `pip install torch` automatisch die CPU-Variante.
 Wer eine NVIDIA-GPU nutzen möchte, folgt der Anleitung auf https://pytorch.org.
@@ -111,6 +117,12 @@ AgentExample/
 ├── OntologySearchAgentExecutor.py
 ├── SemanticMediatorAgent.py   # Agent H: Semantischer Mediator des BIBA
 ├── SemanticMediatorAgentExecutor.py
+│
+├── biba_mcp_server.py         # MCP-Server: Mitarbeitende, Publikationen, PDF-Zusammenfassung
+├── ResearchAgent.py           # Agent I: MCP-Client, Gedächtnis, Reviewer/Profil/Fragen
+├── ResearchAgentExecutor.py   # Research: A2A-Anbindung
+├── memory/                    # (wird erzeugt) Gedächtnis-Datei des Research-Agenten
+├── downloads/                 # (wird erzeugt) heruntergeladene PDFs
 │
 ├── requirements.txt           # Alle Pakete für Teil 1 bis 3
 ├── main.py                    # PyCharm-Beispieldatei, nicht Teil des Tutorials
@@ -182,7 +194,11 @@ Erwartete Ausgabe:
 [Server] Agent F – Weather        -> http://127.0.0.1:9999/weather  (Skill: weather)
 [Server] Agent G – Ontology Search -> http://127.0.0.1:9999/ontology  (Skill: ontology_search)
 [Server] Agent H – Semantic Mediator -> http://127.0.0.1:9999/mediator  (Skill: semantic_mediation)
+[Server] Agent I – Research       -> http://127.0.0.1:9999/research  (Skill: find_reviewer)
 INFO:     Uvicorn running on http://127.0.0.1:9999
+[Research] Gedächtnis geladen: 0 Personen, 0 indexiert (memory\forschungsindex.json)
+[Research] MCP-Server verbunden, Tools: list_biba_staff, search_publications, summarize_pdf, summarize_text
+[Research] (1/86) Michael Freitag ...
 ```
 
 Der Server weiß nichts über die einzelnen Agenten. Er fragt jeden Executor nur:
@@ -299,6 +315,7 @@ Erwartete Ausgabe:
 [Orchestrator] Gefunden: Agent F – Weather – Skills: weather
 [Orchestrator] Gefunden: Agent G – Ontology Search – Skills: ontology_search
 [Orchestrator] Gefunden: Agent H – Semantic Mediator – Skills: semantic_mediation
+[Orchestrator] Gefunden: Agent I – Research – Skills: find_reviewer, staff_profile, staff_question
 
 === Eingabe: Was ist 20 minus 8?
 
@@ -369,6 +386,9 @@ Diese Eingaben zeigen, wie das Routing entscheidet:
 | `Wie ist das Wetter in Bremen?` | `weather` |
 | `Welche Ontologien gibt es für Sensoren?` | `ontology_search` |
 | `Welche Datenmodelle kennt der Mediator?` | `semantic_mediation` |
+| `Wer sollte ein Paper über Predictive Maintenance reviewen?` | `find_reviewer` |
+| `Erstelle das Forschungsprofil von Karl Hribernik` | `staff_profile` |
+| `Wie erreiche ich Michael Freitag?` | `staff_question` |
 
 Adder und Subtractor sind absichtlich ähnlich beschrieben, damit das LLM
 wirklich anhand der Beschreibung entscheiden muss. Bei mehrdeutigen Eingaben
@@ -489,7 +509,184 @@ Modell die Anfragen sauber trennen kann.
 
 ---
 
-## 7. Übung: Einen eigenen Agenten anschließen
+## 7. Teil 4: Research-Agent mit MCP-Server und Gedächtnis
+
+Bisher hatte jeder Agent genau eine Fähigkeit und kein Gedächtnis. Agent I
+ist anders gebaut:
+
+* Er holt sich seine Daten nicht selbst, sondern über einen **MCP-Server**
+  (Model Context Protocol), der als Kindprozess läuft und vier Werkzeuge anbietet.
+* Er baut **beim Hochfahren ein Gedächtnis** auf: alle Mitarbeitenden des BIBA
+  mit ihren Veröffentlichungen, Zusammenfassungen und Keywords.
+* Er hat **drei Skills** auf einer Visitenkarte: Reviewer finden, Profil
+  erstellen, Fragen zu Personen beantworten.
+
+```
+                          A2A                        MCP (stdio)
+Orchestrator / Agent A  ───────▶  Agent I – Research  ───────────▶  biba_mcp_server.py
+                                  │  Gedächtnis (JSON)              │  list_biba_staff      → biba.uni-bremen.de
+                                  │  TF-IDF-Ranking                 │  search_publications  → Google Scholar / OpenAlex
+                                  │  Skills: reviewer/profil/frage  │  summarize_pdf        → pypdf, extraktiv
+                                  └───────────────────────────────  │  summarize_text
+```
+
+### Der MCP-Server (`biba_mcp_server.py`)
+
+MCP ist ein offener Standard, mit dem ein Agent Werkzeuge eines anderen
+Prozesses aufrufen kann. Ein Werkzeug ist eine Python-Funktion mit Docstring
+und Typangaben, der Rest ist Dekorator:
+
+```python
+mcp = MCPServer("biba-research")
+
+@mcp.tool()
+async def list_biba_staff(abteilung: str = "") -> list[dict]:
+    """Holt die Liste der Mitarbeitenden von der BIBA-Webseite."""
+    ...
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+| Werkzeug | Was es tut | Quelle |
+|----------|-----------|--------|
+| `list_biba_staff` | Liest die Mitarbeitertabelle der BIBA-Webseite: Name, Titel, Rolle, E-Mail, Telefon, Raum, Abteilung, Homepage | https://www.biba.uni-bremen.de/institut/mitarbeiterinnen.html |
+| `search_publications` | Sucht Veröffentlichungen einer Person und lädt Open-Access-PDFs herunter | Google Scholar (`scholarly`), bei Sperre automatisch OpenAlex mit Filter auf die BIBA-Institution |
+| `summarize_pdf` | Extrahiert den Text einer PDF und erstellt Zusammenfassung plus Keywords | `pypdf`, extraktive Zusammenfassung |
+| `summarize_text` | Dasselbe für einen Text, z. B. ein Abstract | |
+
+Zwei Dinge sind bewusst so gelöst:
+
+* **Google Scholar blockt Skripte.** Scholar hat keine offizielle API, und
+  `scholarly` bekommt in der Praxis schnell einen Captcha. Der Server versucht
+  Scholar mit Zeitlimit und weicht auf [OpenAlex](https://openalex.org) aus.
+  OpenAlex ist frei, liefert Abstracts, Keywords und PDF-Fundorte, und der
+  Filter auf die BIBA-Institution vermeidet Namensvettern. Der Agent merkt sich
+  eine Scholar-Sperre und nutzt für den restlichen Lauf direkt OpenAlex.
+  Mit `RESEARCH_SOURCE=openalex` überspringst du Scholar von vornherein.
+* **Die Zusammenfassung ist extraktiv, ohne Sprachmodell.** Sie wählt die
+  Sätze mit den häufigsten Fachwörtern und liefert die häufigsten Wörter und
+  Wortpaare als Keywords. Das ist deterministisch und schnell genug, um beim
+  Start Dutzende Dokumente zu verarbeiten. Viele Verlags-PDFs sind hinter
+  Bot-Sperren, dann wird das Abstract zusammengefasst.
+
+Server allein testen, ohne Agent:
+
+```bash
+mcp dev biba_mcp_server.py      # MCP-Inspector im Browser
+```
+
+### Der Agent (`ResearchAgent.py`)
+
+**MCP-Client.** Die Klasse `MCPVerbindung` startet den Server als Kindprozess
+und hält die Sitzung offen. Der Agent ruft Werkzeuge so auf:
+
+```python
+personen = await self.mcp.call("list_biba_staff")
+ergebnis = await self.mcp.call("search_publications", autor="Marco Franke", max_results=3)
+```
+
+**Gedächtnis.** Die Klasse `Gedaechtnis` hält pro Person Stammdaten,
+Veröffentlichungen (mit Zusammenfassung und Keywords) und ein gewichtetes
+Keyword-Profil. Beim Start passiert Folgendes:
+
+1. `beim_start()` lädt die Datei `memory/forschungsindex.json`, falls vorhanden.
+2. Der MCP-Server wird gestartet.
+3. Ein Hintergrund-Task ruft `list_biba_staff` auf und geht alle Personen durch,
+   die noch nicht in der Datei sind: `search_publications`, dann pro
+   Veröffentlichung `summarize_pdf` oder `summarize_text`. Nach jeder Person
+   wird gespeichert, ein Abbruch verliert also nichts.
+4. Der Server nimmt währenddessen schon Anfragen an. Jede Antwort enthält den
+   Stand, z. B. `[Gedächtnis: 40/86 Personen indexiert, Phase: läuft]`.
+
+Der erste Start dauert einige Minuten (etwa zwei Sekunden pro Person). Jeder
+weitere Start liest nur die Datei. Zum Neuaufbau die Datei löschen.
+
+**Ranking.** Für Reviewer-Auswahl und „Wer arbeitet an ...?“ baut das
+Gedächtnis aus Keywords, Titeln und Zusammenfassungen ein TF-IDF-Modell und
+vergleicht die Anfrage per Cosinus-Ähnlichkeit mit jedem Profil. Die
+Ausgabe nennt die Begriffe, die den Ausschlag gaben.
+
+`agents_server.py` weiß von alldem nichts. Er prüft nur, ob ein Agent
+`beim_start()` und `beim_stopp()` anbietet, und hängt sie als Starlette-Hooks ein.
+
+### Die drei Skills
+
+**1. `find_reviewer`: Reviewer für ein Paper vorschlagen**
+
+Eingabe ist ein Titel, ein Abstract oder der Pfad einer PDF. Bei einer PDF
+ruft der Agent `summarize_pdf` auf und nutzt Zusammenfassung und Keywords als
+Suchanfrage. Personen, die im Anfragetext oder auf der Titelseite der PDF
+genannt werden, gelten als Autor:innen und werden ausgeschlossen. Bei
+Preprints ohne Autorenzeile im extrahierten Text greift das nicht, dann den
+Namen einfach mit in die Anfrage schreiben.
+
+```
+>>> Review-Anfrage: Semantic interoperability and data infrastructure for predictive maintenance of wind turbines
+Paper: Semantic interoperability and data infrastructure for predictive maintenance of wind turbines
+[Gedächtnis: 86/86 Personen indexiert, Phase: fertig]
+Vorgeschlagene Reviewer:
+  1. Stephan Oelker (Abt. 9, oel@biba.uni-bremen.de) – Score 0.22
+     passende Begriffe: wind, maintenance, turbines, predictive, data
+     • 2019: Machine learning-based icing prediction on wind turbines
+  2. Karl Hribernik (Abt. 2.2, hri@biba.uni-bremen.de) – Score 0.148
+     passende Begriffe: infrastructure, interoperability, data, semantic
+     • 2026: Data infrastructure approach for information interoperability for the use of AI ...
+```
+
+**2. `staff_profile`: Forschungsprofil einer Person**
+
+```
+>>> Erstelle das Forschungsprofil von Michael Freitag
+Forschungsprofil: Prof. Dr.-Ing. Michael Freitag
+Abteilung 1 · Raum 1080 · +49 421 218-50 001 · fre@biba.uni-bremen.de
+Forschungsschwerpunkte (aus 3 Veröffentlichungen, 2025):
+  entwicklung, digitalisierung, exoskelette, herstellung, biomaterialien, ...
+Veröffentlichungen:
+  • 2025: Gamification zur Akzeptanzsteigerung industrieller Exoskelette
+    in: Zeitschrift für wirtschaftlichen Fabrikbetrieb
+    Kurz: Im Rahmen dieser Studie wurde ein gamifiziertes Anreizsystem ...
+Häufige Ko-Autor:innen: Michael Lütjen (2), Lars Panter (1), ...
+```
+
+**3. `staff_question`: Fragen zu einer Person**
+
+Der Agent erkennt die Person am Namen (voller Name, Nachname, auch leicht
+falsch geschrieben) und die Art der Frage an Stichwörtern:
+
+| Frage | Antwort aus dem Gedächtnis |
+|-------|----------------------------|
+| `Wie erreiche ich Michael Freitag?` | Abteilung, Raum, Telefon, E-Mail, Homepage |
+| `Woran forscht Hribernik?` | Top-Keywords und neueste Veröffentlichung mit Kurzfassung |
+| `Welche Veröffentlichungen hat Franke zu Interoperabilität?` | Passende Titel mit Link, ohne Thema alle bekannten |
+| `Mit wem publiziert Freitag?` | Ko-Autor:innen mit Häufigkeit |
+| `Wie viele Paper hat Oelker?` | Anzahl im Gedächtnis |
+| `Wer im BIBA arbeitet an Predictive Maintenance?` | Rangliste der passenden Personen |
+
+### Konfiguration
+
+| Variable | Standard | Bedeutung |
+|----------|----------|-----------|
+| `RESEARCH_INDEX_AT_STARTUP` | `1` | `0` lädt nur die Datei und indexiert nicht nach |
+| `RESEARCH_MAX_STAFF` | `0` (alle) | Nur die ersten N Personen indexieren, praktisch zum Ausprobieren |
+| `RESEARCH_MAX_PUBS` | `3` | Veröffentlichungen pro Person |
+| `RESEARCH_SOURCE` | `auto` | `scholar`, `openalex` oder `auto` (Scholar, bei Sperre OpenAlex) |
+| `RESEARCH_MEMORY_FILE` | `memory/forschungsindex.json` | Gedächtnis-Datei |
+| `RESEARCH_DOWNLOAD_DIR` | `downloads` | Ordner für PDFs |
+| `OPENALEX_MAILTO` | leer | E-Mail für den schnelleren „polite pool“ von OpenAlex |
+| `SCHOLAR_TIMEOUT` | `40` | Sekunden, die ein Scholar-Versuch höchstens dauern darf |
+
+Zum schnellen Ausprobieren:
+
+```bash
+set RESEARCH_MAX_STAFF=10
+set RESEARCH_SOURCE=openalex
+python agents_server.py
+```
+
+---
+
+## 8. Übung: Einen eigenen Agenten anschließen
 
 Ein neuer Agent braucht genau drei Änderungen. Als Beispiel ein Multiplizierer.
 
@@ -547,7 +744,7 @@ Die Skill-Beschreibung ist die einzige Information, die das Routing steuert.
 
 ---
 
-## 8. Fehlersuche
+## 9. Fehlersuche
 
 **`ConnectError` oder `Connection refused` beim Start von Agent A oder Orchestrator**
 Der Server läuft nicht. Starte zuerst `python agents_server.py` in einem
@@ -599,3 +796,28 @@ Die Umgebungsvariable muss im Terminal gesetzt sein, in dem der
 **Mediator-Agent: `404` oder unerwartete Antwort**
 Die Pfade oder das Nachrichtenformat der eigenen Mediator-Instanz weichen von
 den Annahmen ab. Anpassen in `MediatorClient` in `SemanticMediatorAgent.py`.
+
+**Research-Agent: `No module named 'mcp.server.fastmcp'`**
+Es ist MCP-SDK Version 1 installiert. Dieses Projekt nutzt Version 2
+(`pip install "mcp>=2"`), dort heißt die Serverklasse `MCPServer`.
+
+**Research-Agent: `No module named 'bibtexparser.bibdatabase'`**
+`scholarly` braucht `bibtexparser` Version 1: `pip install "bibtexparser<2"`.
+
+**Research-Agent: `Google Scholar nicht nutzbar (MaxTriesExceededException)`**
+Scholar blockt die Anfragen. Das ist normal und kein Fehler: Der Agent nutzt
+OpenAlex. Wer Scholar gar nicht erst probieren will, setzt `RESEARCH_SOURCE=openalex`.
+
+**Research-Agent: `Ich habe keine bekannte Person im Text gefunden`**
+Entweder ist der Name nicht auf der BIBA-Seite, oder das Gedächtnis ist noch
+leer (siehe Phase in der Meldung). Nachname reicht, z. B. „Profil von Hribernik“.
+
+**Research-Agent: Antworten enthalten `Phase: läuft`**
+Die Indexierung läuft noch im Hintergrund. Antworten sind bereits möglich, aber
+unvollständig. Im Server-Terminal steht der Fortschritt.
+
+**Research-Agent: keine PDFs in `downloads/`**
+Viele Verlage sperren automatische Downloads. Dann wird das Abstract
+zusammengefasst, was für Ranking und Profil ausreicht. PDFs, die du selbst
+hast, kannst du direkt mit einer Review-Anfrage übergeben:
+`Review-Anfrage: C:/papers/eingereicht.pdf`.

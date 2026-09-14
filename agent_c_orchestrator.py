@@ -44,6 +44,7 @@ AGENTS = [
     {"base_url": SERVER_URL, "path": "/weather"},     # Agent F – Weather
     {"base_url": SERVER_URL, "path": "/ontology"},    # Agent G – Ontology Search
     {"base_url": SERVER_URL, "path": "/mediator"},    # Agent H – Semantic Mediator
+    {"base_url": SERVER_URL, "path": "/research"},    # Agent I – Research (MCP)
 ]
 
 # Lokales Modell von Hugging Face. Alternativen (gleiche Größenklasse):

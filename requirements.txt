@@ -8,3 +8,10 @@ uvicorn
 torch
 transformers
 accelerate
+
+# Teil 4: Research-Agent mit MCP-Server
+mcp>=2
+pypdf
+beautifulsoup4
+scholarly
+bibtexparser<2
