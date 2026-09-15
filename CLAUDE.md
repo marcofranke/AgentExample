@@ -59,7 +59,19 @@ Drei Phasen: **Discovery** (AgentCards aller `AGENTS` holen) → **Routing** (lo
 
 ### Research-Agent + MCP (`ResearchAgent.py`, `biba_mcp_server.py`)
 
-Der einzige Agent mit Gedächtnis, und der einzige, der einen **MCP-Server als Kindprozess** (stdio) startet. Wichtige Grenze: *Der Agent ruft selbst keine Webseite auf.* Jede Datenbeschaffung – BIBA-Mitarbeitendenliste, ORCID-Abgleich, Publikationssuche (Google Scholar mit OpenAlex als Ausweichquelle), PDF-Download, Zusammenfassung – ist ein MCP-Tool. Im Agenten bleiben nur Gedächtnis, TF-IDF-ähnliches Ranking und Sprachausgabe. Neue Datenquellen gehören folglich in `biba_mcp_server.py`.
+Der einzige Agent mit Gedächtnis, und der einzige, der einen **MCP-Server als Kindprozess** (stdio) startet. Wichtige Grenze: *Der Agent ruft selbst keine Webseite auf.* Jede Datenbeschaffung – BIBA-Mitarbeitendenliste, ORCID-Abgleich, Publikationsliste des BIBA, Publikationssuche bei Scholar/OpenAlex, PDF-Download, Zusammenfassung – ist ein MCP-Tool. Im Agenten bleiben nur Gedächtnis, TF-IDF-ähnliches Ranking und Sprachausgabe. Neue Datenquellen gehören folglich in `biba_mcp_server.py`.
+
+**Publikationsquellen (`quelle="auto"`): BIBA-Liste → Scholar → OpenAlex.** Die erste Quelle mit Treffern gewinnt.
+
+`list_biba_publications` liest <https://www.biba.uni-bremen.de/forschung/publikationen.html>. Das ist die maßgebliche Quelle, weil das Institut sie selbst pflegt: Die Zuordnung Person → Veröffentlichung kommt von dort statt aus einem Namensabgleich, Namensvettern gibt es gar nicht erst. Ein Abruf liefert **alle** ~2100 Einträge ab 2005 (der Jahresfilter der Seite steht von Haus aus auf „alle"), deshalb wird die Seite einmal geholt und im Prozess behalten – `_publikationen_zwischenspeicher`, geschützt durch eine `asyncio.Lock`. Ohne das zöge eine Indexierung 86-mal 2,1 MB.
+
+Jeder Eintrag ist ein `<p>` mit festem Aufbau (Autorenzeile, `<strong>`-Titel, „In: …"-Quelle, DOI-/BibTeX-Links). Der Parser trifft bei allen 2122 Einträgen Titel, Autoren, Quelle und Jahr; das Jahr kommt aus dem BibTeX-Block, weil es in der Quellenangabe als `120(2025)6` zwischen Band und Heft klemmt. Die Seite kodiert den BibTeX fürs `onclick`-Attribut um (`/#/` → Zeilenumbruch, `/#q/` → `\"`), `_bibtex_entzerren()` macht das rückgängig.
+
+**Anreicherung.** Die Seite führt weder Abstracts noch Keywords – für das Ranking ist aber genau der Inhalt das Wertvollste. `_openalex_anreichern()` holt beides in zwei Durchgängen mit je *einer* Anfrage (OpenAlex verodert Filterwerte mit `|`): erst über die DOI, dann über den Titel für den Rest. Der zweite Durchgang ist nicht optional – nur gut 40 % der Einträge haben eine DOI, und gerade die neuesten Arbeiten mancher Personen haben keine. Mit beiden Durchgängen bekommen 116 von 145 ausgewählten Titeln (80 %) Inhalt, ohne den zweiten wären es 94.
+
+Weil `title.search` unscharf sucht, prüft `_titel_gleich()` mit 80 % Wortüberlappung nach, bevor etwas übernommen wird. Ohne diese Prüfung hinge irgendwann ein fremdes Abstract an einer Publikation.
+
+**`ohne_scholar`.** Scholar steht in der Kette hinter der BIBA-Liste und wird deshalb nur noch für Personen ohne BIBA-Eintrag versucht – meist Verwaltung und Technik, wo es ohnehin nichts findet. Damit nicht jede davon in das 40-Sekunden-Zeitlimit läuft, setzt der Agent `ohne_scholar=True`, sobald Scholar einmal gesperrt hat. Wichtig: Er darf dafür **nicht** wie früher `quelle="openalex"` setzen, sonst fiele die BIBA-Liste für alle weiteren Personen weg.
 
 **ORCID-Abgleich (`find_orcid`).** Der Name von der BIBA-Webseite ist als Suchschlüssel mehrdeutig („Michael Freitag“, „Marco Franke“ gibt es mehrfach), und eine Namensverwechslung verfälscht direkt die Reviewer-Auswahl. Deshalb wird zu jedem Namen die ORCID-iD gesucht und an `search_publications` weitergereicht. Drei Punkte, die beim Ändern zu beachten sind:
 
@@ -127,7 +139,7 @@ Alle optional, alle mit Standardwert im Code:
 | `RESEARCH_INDEX_AT_STARTUP` | `1` | `0` = Gedächtnis nur laden, nicht nachindexieren |
 | `RESEARCH_MAX_STAFF` | `0` (alle ~86) | Nur die ersten N Personen indexieren – zum schnellen Ausprobieren |
 | `RESEARCH_MAX_PUBS` | `3` | Veröffentlichungen pro Person |
-| `RESEARCH_SOURCE` | `auto` | `scholar`, `openalex` oder `auto` |
+| `RESEARCH_SOURCE` | `auto` | `auto` (BIBA-Liste, dann Scholar, dann OpenAlex), sonst `biba`, `scholar`, `openalex` |
 | `RESEARCH_ORCID` | `1` | `0` = kein ORCID-Abgleich; Publikationssuche läuft dann nur über den Namen |
 | `RESEARCH_REVIEWER` | `2` | Anzahl der Reviewer-Vorschläge |
 | `ORCID_BIBA_PATTERN` | `\bbiba\b\|bremer institut` | Regex, an der im ORCID-Profil die BIBA-Zugehörigkeit erkannt wird |
@@ -143,7 +155,7 @@ Alle optional, alle mit Standardwert im Code:
 
 Zugangsdaten stehen in `.env` (per `.gitignore` ausgeschlossen, Vorlage: `.env.example`) und zusätzlich als dauerhafte User-Umgebungsvariable. Das Projekt lädt `.env` **nicht** selbst ein – die Datei dient als Ablage und für die PyCharm-Run-Konfiguration; wirksam ist die Umgebungsvariable.
 
-Beim Arbeiten am Research-Agenten lohnt sich `RESEARCH_MAX_STAFF=5` und `RESEARCH_SOURCE=openalex` – eine volle Indexierung dauert lange und Scholar blockt Skripte häufig.
+Beim Arbeiten am Research-Agenten lohnt sich `RESEARCH_MAX_STAFF=5` und `RESEARCH_SOURCE=biba` – eine volle Indexierung dauert lange, und die BIBA-Liste braucht nur einen Abruf für alle Personen, ohne Scholar-Zeitlimit.
 
 ## Hinweise
 

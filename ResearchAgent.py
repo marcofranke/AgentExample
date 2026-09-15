@@ -29,7 +29,8 @@ Umgebungsvariablen (alle optional):
     RESEARCH_INDEX_AT_STARTUP  "1" (Standard) baut das Gedächtnis beim Start auf, "0" nur laden
     RESEARCH_MAX_STAFF         0 = alle Mitarbeitenden (Standard), sonst nur die ersten N
     RESEARCH_MAX_PUBS          Veröffentlichungen pro Person (Standard 3)
-    RESEARCH_SOURCE            "auto" (Standard), "scholar" oder "openalex"
+    RESEARCH_SOURCE            "auto" (Standard: BIBA-Liste, dann Scholar, dann OpenAlex),
+                               sonst "biba", "scholar" oder "openalex"
     RESEARCH_MEMORY_FILE       Pfad der Gedächtnis-Datei (Standard memory/forschungsindex.json)
     RESEARCH_DOWNLOAD_DIR      Ordner für PDFs (Standard downloads/)
     RESEARCH_ORCID             "1" (Standard) gleicht Namen gegen ORCID ab, "0" schaltet das ab
@@ -465,6 +466,7 @@ class ResearchAgent:
             status["gesamt"] = len(personen)
             status["indexiert"] = sum(1 for p in personen if self.gedaechtnis.personen.get(p["name"], {}).get("indexiert_am"))
             quelle = self.quelle
+            ohne_scholar = False  # wird gesetzt, sobald Scholar einmal gesperrt hat
             orcid_nachgetragen = False
             for i, stamm in enumerate(personen, 1):
                 eintrag = self.gedaechtnis.person_anlegen(stamm)
@@ -480,14 +482,16 @@ class ResearchAgent:
                 try:
                     ergebnis = await self.mcp.call(
                         "search_publications", autor=stamm["name"], max_results=self.max_pubs,
-                        quelle=quelle, orcid=eintrag.get("orcid", ""),
+                        quelle=quelle, orcid=eintrag.get("orcid", ""), ohne_scholar=ohne_scholar,
                     )
                 except RuntimeError as err:
                     status["hinweise"].append(f"{stamm['name']}: {err}")
                     ergebnis = {"publikationen": [], "hinweis": str(err)}
                 if quelle == "auto" and "Google Scholar nicht nutzbar" in ergebnis.get("hinweis", ""):
-                    print("[Research] Google Scholar blockt – für diesen Lauf direkt OpenAlex verwenden.")
-                    quelle = "openalex"
+                    # Nur Scholar überspringen, nicht die ganze Kette abkürzen: Die
+                    # BIBA-Liste bleibt die erste Wahl, OpenAlex der Ausweg danach.
+                    print("[Research] Google Scholar blockt – für diesen Lauf übersprungen.")
+                    ohne_scholar = True
                 publikationen = ergebnis.get("publikationen", [])
                 for pub in publikationen:
                     await self._zusammenfassen(pub)

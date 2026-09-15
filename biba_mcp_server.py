@@ -5,26 +5,31 @@ MCP (Model Context Protocol) ist ein Standard, über den ein Agent Werkzeuge
 Kindprozess des Agenten und spricht über stdin/stdout (Transport "stdio").
 
 Werkzeuge:
-    list_biba_staff        Mitarbeitende von der BIBA-Webseite holen
-    find_orcid             ORCID-iD einer Person suchen, BIBA-Profil auswählen
-    search_publications    Veröffentlichungen einer Person suchen und PDFs laden
-    summarize_pdf          Zusammenfassung + Keywords zu einer PDF-Datei
-    summarize_text         dasselbe für einen Text (z. B. ein Abstract)
+    list_biba_staff          Mitarbeitende von der BIBA-Webseite holen
+    find_orcid               ORCID-iD einer Person suchen, BIBA-Profil auswählen
+    list_biba_publications   die Publikationsliste des BIBA lesen und filtern
+    search_publications      Veröffentlichungen einer Person suchen und PDFs laden
+    summarize_pdf            Zusammenfassung + Keywords zu einer PDF-Datei
+    summarize_text           dasselbe für einen Text (z. B. ein Abstract)
 
 Direkt testen (ohne Agent):
     python biba_mcp_server.py            # wartet auf MCP-Nachrichten über stdio
     mcp dev biba_mcp_server.py           # MCP-Inspector im Browser
 
-Publikationsquellen:
-    1. Google Scholar über das Paket `scholarly`. Scholar hat keine offizielle
+Publikationsquellen, in dieser Reihenfolge ("auto"):
+    1. Die Publikationsliste des BIBA selbst. Maßgeblich, weil das Institut sie
+       pflegt: Die Zuordnung Person -> Veröffentlichung kommt von dort und nicht
+       aus einem Namensabgleich. Ein Abruf liefert alle ~2100 Einträge ab 2005.
+       Abstracts führt die Seite nicht – die kommen über die DOI von OpenAlex.
+    2. Google Scholar über das Paket `scholarly`. Scholar hat keine offizielle
        API und blockt Skripte häufig. Deshalb mit Zeitlimit und ...
-    2. ... OpenAlex (https://openalex.org) als zuverlässige, freie Ausweichquelle
+    3. ... OpenAlex (https://openalex.org) als zuverlässige, freie Ausweichquelle
        mit Filter auf die BIBA-Institution, Abstracts, Keywords und Open-Access-PDFs.
 
 Namensgleichheit ist das Hauptproblem beim Indexieren: "Michael Freitag" gibt es
-mehrfach in der Wissenschaft. Deshalb wird zu jedem Namen von der BIBA-Webseite
-zuerst die ORCID-iD gesucht (`find_orcid`) und für die Publikationssuche
-mitgegeben – sie identifiziert die Person statt nur ihren Namen.
+mehrfach in der Wissenschaft. Die BIBA-Liste hat das Problem nicht. Für alles,
+was darüber hinaus gesucht wird, wird zu jedem Namen die ORCID-iD ermittelt
+(`find_orcid`) und mitgegeben – sie identifiziert die Person statt ihren Namen.
 """
 
 import asyncio
@@ -40,6 +45,7 @@ from mcp.server.mcpserver import MCPServer
 from pypdf import PdfReader
 
 STAFF_URL = "https://www.biba.uni-bremen.de/institut/mitarbeiterinnen.html"
+PUBLICATIONS_URL = "https://www.biba.uni-bremen.de/forschung/publikationen.html"
 BIBA_BASE = "https://www.biba.uni-bremen.de/"
 MAIL_DOMAIN = "biba.uni-bremen.de"
 
@@ -275,7 +281,224 @@ async def find_orcid(name: str, vorname: str = "", nachname: str = "", max_treff
 
 
 # ---------------------------------------------------------------------------
-# Tool 3: Veröffentlichungen suchen und herunterladen
+# Tool 3: Die Publikationsliste des BIBA
+# ---------------------------------------------------------------------------
+# Die maßgebliche Quelle für BIBA-Veröffentlichungen: das Institut pflegt sie
+# selbst. Ein einziger Abruf liefert alle rund 2100 Einträge von 2005 bis heute
+# (der Jahresfilter der Seite steht von Haus aus auf "alle"), deshalb wird die
+# Seite EINMAL geholt und im Prozess behalten – nicht einmal pro Person.
+#
+# Jeder Eintrag ist ein <p> mit immer demselben Aufbau:
+#
+#     Panter, L.; Petzoldt, C.; Freitag, M.<br>
+#     <strong>Gamification zur Akzeptanzsteigerung ...</strong><br>
+#     In: Zeitschrift für wirtschaftlichen Fabrikbetrieb, 120(2025)6, ...<br>
+#     [<a href="https://doi.org/...">DOI</a> | <a href="javascript:showBibTeX...">BibTeX</a>]
+#
+# Gegenüber Scholar und OpenAlex hat das einen entscheidenden Vorteil: Die
+# Zuordnung Person -> Veröffentlichung stammt vom Institut selbst. Namensvettern
+# gibt es hier gar nicht erst, der Umweg über ORCID entfällt.
+_publikationen_zwischenspeicher: list[dict] | None = None
+_publikationen_sperre = asyncio.Lock()
+
+# Das onclick-Attribut kann keine Zeilenumbrüche und Anführungszeichen enthalten,
+# deshalb kodiert die Seite den BibTeX-Block um. Die Gegenrichtung steht als
+# JavaScript in der Seite selbst (showBibTeXpopover).
+def _bibtex_entzerren(roh: str) -> str:
+    return roh.replace("/#/", "\n").replace("/#q/", '\\"')
+
+
+def _text_vor(element) -> str:
+    """Erster nicht-leerer Textknoten vor dem Element – die Autorenzeile."""
+    for knoten in element.previous_siblings:
+        text = knoten.get_text(" ", strip=True) if hasattr(knoten, "get_text") else str(knoten).strip()
+        if text:
+            return text
+    return ""
+
+
+def _text_nach(element) -> str:
+    """Erster sinnvoller Textknoten nach dem Titel – die Quellenangabe."""
+    for knoten in element.next_siblings:
+        text = knoten.get_text(" ", strip=True) if hasattr(knoten, "get_text") else str(knoten).strip()
+        if not text or text.startswith("["):
+            continue  # die Zeile mit den DOI-/BibTeX-Links
+        return text[3:].strip() if text.startswith("In:") else text
+    return ""
+
+
+def _publikation_aus_absatz(absatz) -> dict | None:
+    titel_tag = absatz.find("strong")
+    if not titel_tag:
+        return None
+    roh = str(absatz)
+    doi_link = absatz.find("a", href=re.compile(r"doi\.org"))
+    bibtex = re.search(r"showBibTeXpopover\('(.*?)'\s*\)", roh, re.DOTALL)
+    # Das Jahr steht im BibTeX-Block verlässlicher als in der Quellenangabe,
+    # wo es als "120(2025)6" zwischen Band und Heft klemmt.
+    jahr = re.search(r"year\s*=\s*\{?\s*(\d{4})", roh)
+    return {
+        "titel": titel_tag.get_text(" ", strip=True),
+        "jahr": int(jahr.group(1)) if jahr else None,
+        # "Panter, L.; Petzoldt, C.; Freitag, M." -> einzelne Namen
+        "autoren": [a.strip() for a in _text_vor(titel_tag).split(";") if a.strip()],
+        "venue": _text_nach(titel_tag),
+        "abstract": "",     # die Seite führt keine Abstracts ...
+        "keywords": [],     # ... und keine Keywords
+        "url": doi_link["href"] if doi_link else PUBLICATIONS_URL,
+        "doi": doi_link["href"] if doi_link else "",
+        "pdf_url": "",
+        "pdf_urls": [],
+        "bibtex": _bibtex_entzerren(bibtex.group(1)) if bibtex else "",
+        "quelle": "biba",
+    }
+
+
+async def _biba_publikationen(http: httpx.AsyncClient) -> list[dict]:
+    """Die komplette Liste, beim ersten Aufruf geholt und danach behalten."""
+    global _publikationen_zwischenspeicher
+    async with _publikationen_sperre:
+        if _publikationen_zwischenspeicher is None:
+            antwort = await http.get(PUBLICATIONS_URL)
+            antwort.raise_for_status()
+            haupt = BeautifulSoup(antwort.text, "html.parser").find("main")
+            eintraege = [] if haupt is None else haupt.find_all("p")
+            _publikationen_zwischenspeicher = [
+                p for p in (_publikation_aus_absatz(e) for e in eintraege) if p
+            ]
+    return _publikationen_zwischenspeicher
+
+
+def _ist_autor(publikation: dict, vorname: str, nachname: str) -> bool:
+    """Steht die Person in der Autorenliste? Die Seite kürzt Vornamen ab ("Freitag, M.")."""
+    nach = normal(nachname)
+    ruf = normal(vorname).split()
+    if not nach:
+        return False
+    for eintrag in publikation["autoren"]:
+        teile = normal(eintrag).split()
+        if nach not in teile:
+            continue
+        if not ruf:
+            return True
+        # Vorname ausgeschrieben oder als Initial
+        if any(t == ruf[0] or t == ruf[0][:1] for t in teile if t != nach):
+            return True
+    return False
+
+
+@mcp.tool()
+async def list_biba_publications(
+    autor: str = "", vorname: str = "", nachname: str = "", max_results: int = 0
+) -> dict:
+    """Liest die Publikationsliste des BIBA und filtert sie nach einer Person.
+
+    Ohne `autor`/`nachname` kommt die komplette Liste (rund 2100 Einträge).
+    Sortiert wird nach Jahr, neueste zuerst; `max_results` = 0 heißt alle.
+
+    Liefert {"gesamt", "publikationen": [{titel, jahr, autoren, venue, url, doi,
+    bibtex, quelle}]}. Abstracts und Keywords führt die Seite nicht – die holt
+    `search_publications` bei Bedarf über die DOI von OpenAlex nach.
+    """
+    if autor and not nachname:
+        vorname, nachname = autor.rsplit(" ", 1)[0], autor.rsplit(" ", 1)[-1]
+
+    async with httpx.AsyncClient(timeout=120, headers={"User-Agent": USER_AGENT},
+                                 follow_redirects=True) as http:
+        alle = await _biba_publikationen(http)
+
+    passend = [p for p in alle if _ist_autor(p, vorname, nachname)] if nachname else list(alle)
+    passend.sort(key=lambda p: p["jahr"] or 0, reverse=True)
+    return {"gesamt": len(passend), "publikationen": passend[:max_results] if max_results else passend}
+
+
+OPENALEX_FELDER = "doi,title,abstract_inverted_index,keywords,open_access,primary_location,best_oa_location,locations"
+
+
+def _inhalt_uebernehmen(pub: dict, w: dict) -> None:
+    """Abstract, Keywords und PDF-Fundorte aus einem OpenAlex-Werk übernehmen."""
+    pub["abstract"] = abstract_aus_index(w.get("abstract_inverted_index"))
+    pub["keywords"] = [k.get("display_name", "") for k in w.get("keywords") or []]
+    # Über den Titel gefunden: Dann kennt OpenAlex die DOI, die BIBA-Seite aber
+    # nicht. Sonst verwiese die Publikation nur auf die Übersichtsseite.
+    if not pub.get("doi") and w.get("doi"):
+        pub["doi"] = pub["url"] = w["doi"]
+    ort = w.get("primary_location") or {}
+    for kandidat in [(w.get("best_oa_location") or {}).get("pdf_url"), ort.get("pdf_url"),
+                     (w.get("open_access") or {}).get("oa_url")] + [
+                         loc.get("pdf_url") for loc in w.get("locations") or []]:
+        if kandidat and kandidat not in pub["pdf_urls"]:
+            pub["pdf_urls"].append(kandidat)
+    pub["pdf_url"] = pub["pdf_urls"][0] if pub["pdf_urls"] else ""
+
+
+def _titel_gleich(a: str, b: str) -> bool:
+    """Meinen zwei Titel dieselbe Arbeit? `title.search` sucht unscharf.
+
+    Ohne diese Prüfung hinge irgendwann ein fremdes Abstract an einer Publikation.
+    Verlangt werden 80 % gemeinsame Wörter – das verträgt abgeschnittene
+    Untertitel und unterschiedliche Schreibweisen, aber keine andere Arbeit.
+    """
+    wa, wb = set(normal(a).split()), set(normal(b).split())
+    if not wa or not wb:
+        return False
+    return len(wa & wb) / min(len(wa), len(wb)) >= 0.8
+
+
+def _filterwert(text: str) -> str:
+    """Zeichen entfernen, die in einem OpenAlex-Filter Trenner sind."""
+    return re.sub(r"[,:|]", " ", text).strip()
+
+
+async def _openalex_anreichern(http: httpx.AsyncClient, publikationen: list[dict]) -> int:
+    """Holt Abstract, Keywords und PDF-Fundorte zu BIBA-Einträgen nach.
+
+    Die BIBA-Seite nennt Titel, Autoren und Quelle, aber keinen Inhalt – und für
+    das Ranking des Agenten ist der Inhalt das Wertvollste. Zwei Durchgänge,
+    jeder eine einzige Anfrage, weil OpenAlex Filterwerte mit "|" verodert:
+
+    1. über die DOI – eindeutig, aber nur gut 40 % der Einträge haben eine
+    2. über den Titel für den Rest – unscharf, deshalb mit `_titel_gleich`
+       gegengeprüft, bevor etwas übernommen wird
+
+    Erst der zweite Durchgang macht die Quelle brauchbar: Manche Personen haben
+    gerade bei ihren neuesten Arbeiten keine DOI hinterlegt.
+    """
+    getroffen = 0
+
+    async def frage(filterausdruck: str, anzahl: int) -> list[dict]:
+        params = {"filter": filterausdruck, "per-page": max(anzahl, 1), "select": OPENALEX_FELDER}
+        if OPENALEX_MAILTO:
+            params["mailto"] = OPENALEX_MAILTO
+        try:
+            antwort = await http.get(OPENALEX_WORKS, params=params)
+            antwort.raise_for_status()
+            return antwort.json().get("results", [])
+        except httpx.HTTPError:
+            return []  # Anreicherung ist eine Zugabe, kein Muss
+
+    mit_doi = {p["doi"].rsplit("doi.org/", 1)[-1].lower(): p for p in publikationen if p.get("doi")}
+    if mit_doi:
+        for w in await frage("doi:" + "|".join(mit_doi), len(mit_doi)):
+            pub = mit_doi.get((w.get("doi") or "").rsplit("doi.org/", 1)[-1].lower())
+            if pub:
+                _inhalt_uebernehmen(pub, w)
+                getroffen += 1
+
+    offen = [p for p in publikationen if not p["abstract"] and not p["keywords"] and p["titel"]]
+    if offen:
+        titel = "|".join(_filterwert(p["titel"]) for p in offen)
+        for w in await frage(f"title.search:{titel}", len(offen) * 2):
+            for pub in offen:
+                if not pub["abstract"] and not pub["keywords"] and _titel_gleich(pub["titel"], w.get("title") or ""):
+                    _inhalt_uebernehmen(pub, w)
+                    getroffen += 1
+                    break
+    return getroffen
+
+
+# ---------------------------------------------------------------------------
+# Tool 4: Veröffentlichungen suchen und herunterladen
 # ---------------------------------------------------------------------------
 def _scholar_suche(autor: str, max_results: int) -> list[dict]:
     """Blockierender Google-Scholar-Aufruf (läuft in einem Thread)."""
@@ -383,22 +606,56 @@ async def _pdf_laden(http: httpx.AsyncClient, urls: list[str], ziel: Path) -> st
 @mcp.tool()
 async def search_publications(
     autor: str, max_results: int = 5, download: bool = True, quelle: str = "auto",
-    nur_biba: bool = True, orcid: str = ""
+    nur_biba: bool = True, orcid: str = "", ohne_scholar: bool = False
 ) -> dict:
     """Sucht Veröffentlichungen einer Person und lädt verfügbare PDFs herunter.
 
-    quelle: "auto" (erst Google Scholar, bei Fehler OpenAlex), "scholar" oder "openalex".
+    quelle: "auto" (der Reihe nach BIBA-Publikationsliste, Google Scholar,
+        OpenAlex – die erste Quelle mit Treffern gewinnt), sonst "biba",
+        "scholar" oder "openalex" für genau eine Quelle.
     nur_biba: bei OpenAlex nur Arbeiten mit BIBA-Zugehörigkeit (vermeidet Namensvettern).
     orcid: ORCID-iD aus `find_orcid`. Ist sie gesetzt, sucht OpenAlex nach der
         Person statt nach dem Namen – deutlich treffsicherer. Google Scholar
-        kennt keine ORCID-Suche und arbeitet weiter mit dem Namen.
+        kennt keine ORCID-Suche und arbeitet weiter mit dem Namen. Für die
+        BIBA-Liste wird sie nicht gebraucht: Dort ordnet das Institut selbst zu.
+    ohne_scholar: überspringt Scholar in der "auto"-Kette. Der Agent setzt das,
+        sobald Scholar einmal gesperrt hat – sonst liefe jede weitere Person
+        erneut in dessen Zeitlimit.
     Liefert {"quelle", "hinweis", "publikationen": [{titel, jahr, autoren, venue,
     abstract, keywords, url, pdf_url, pdf_pfad, quelle}]}.
     """
     publikationen: list[dict] = []
     hinweis = ""
 
-    if quelle in ("auto", "scholar"):
+    # 1. Die Liste des Instituts zuerst: Sie ist die maßgebliche Quelle für
+    #    BIBA-Veröffentlichungen, und die Zuordnung zur Person stammt vom BIBA
+    #    selbst statt aus einem Namensabgleich.
+    if quelle in ("auto", "biba"):
+        async with httpx.AsyncClient(timeout=120, headers={"User-Agent": USER_AGENT},
+                                     follow_redirects=True) as http:
+            try:
+                gefunden = await _biba_publikationen(http)
+            except httpx.HTTPError as err:
+                gefunden = []
+                hinweis = f"BIBA-Publikationsliste nicht erreichbar ({type(err).__name__})"
+            vorname, nachname = autor.rsplit(" ", 1)[0], autor.rsplit(" ", 1)[-1]
+            passend = sorted(
+                (p for p in gefunden if _ist_autor(p, vorname, nachname)),
+                key=lambda p: p["jahr"] or 0, reverse=True,
+            )
+            # Kopien anlegen: Die Einträge liegen im Zwischenspeicher und werden
+            # gleich mit Abstract und PDF-Pfad beschrieben – das darf nicht auf
+            # die gemeinsame Liste durchschlagen.
+            publikationen = [dict(p, pdf_urls=list(p["pdf_urls"]))
+                             for p in (passend[:max_results] if max_results else passend)]
+            if publikationen:
+                angereichert = await _openalex_anreichern(http, publikationen)
+                hinweis = (f"BIBA-Publikationsliste, {angereichert} von {len(publikationen)} "
+                           "über OpenAlex mit Abstract und Keywords angereichert")
+            elif not hinweis:
+                hinweis = "BIBA-Publikationsliste: keine Treffer"
+
+    if not publikationen and quelle in ("auto", "scholar") and not (ohne_scholar and quelle == "auto"):
         try:
             publikationen = await asyncio.wait_for(
                 asyncio.to_thread(_scholar_suche, autor, max_results), timeout=SCHOLAR_TIMEOUT

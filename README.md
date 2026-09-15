@@ -688,17 +688,19 @@ ist anders gebaut:
 ```
                           A2A                        MCP (stdio)
 Orchestrator / Agent A  ───────▶  Agent I – Research  ───────────▶  biba_mcp_server.py
-                                  │  Gedächtnis (JSON)              │  list_biba_staff      → biba.uni-bremen.de
-                                  │  TF-IDF-Ranking                 │  find_orcid           → orcid.org
-                                  │  Skills: reviewer/profil/frage  │  search_publications  → Google Scholar / OpenAlex
-                                  └───────────────────────────────  │  summarize_pdf        → pypdf, extraktiv
+                                  │  Gedächtnis (JSON)              │  list_biba_staff        → biba.uni-bremen.de
+                                  │  TF-IDF-Ranking                 │  find_orcid             → orcid.org
+                                  │  Skills: reviewer/profil/frage  │  list_biba_publications → biba.uni-bremen.de
+                                  └───────────────────────────────  │  search_publications    → BIBA / Scholar / OpenAlex
+                                                                    │  summarize_pdf          → pypdf, extraktiv
                                                                     │  summarize_text
 ```
 
-Die Kette beim Indexieren ist dabei bewusst dreistufig: Der **Name** kommt von
-der BIBA-Webseite, die **Identität** von ORCID, die **Veröffentlichungen** von
-OpenAlex. Jeder Schritt schärft den vorigen – ohne ORCID würde der Agent
-Namensvettern mitindexieren und darauf Reviewer vorschlagen.
+Die Kette beim Indexieren ist dabei bewusst gestaffelt: Der **Name** kommt von
+der BIBA-Webseite, die **Identität** von ORCID, die **Veröffentlichungen** aus
+der Publikationsliste des Instituts und ihr **Inhalt** von OpenAlex. Jeder
+Schritt schärft den vorigen – ohne diese Stufen würde der Agent Namensvettern
+mitindexieren und darauf Reviewer vorschlagen.
 
 ### Der MCP-Server (`biba_mcp_server.py`)
 
@@ -722,11 +724,50 @@ if __name__ == "__main__":
 |----------|-----------|--------|
 | `list_biba_staff` | Liest die Mitarbeitertabelle der BIBA-Webseite: Name, Titel, Rolle, E-Mail, Telefon, Raum, Abteilung, Homepage | https://www.biba.uni-bremen.de/institut/mitarbeiterinnen.html |
 | `find_orcid` | Sucht die ORCID-iD zu einem Namen und nimmt das Profil, in dem das BIBA steht | https://orcid.org/ |
-| `search_publications` | Sucht Veröffentlichungen einer Person und lädt Open-Access-PDFs herunter | Google Scholar (`scholarly`), bei Sperre automatisch OpenAlex mit Filter auf ORCID-iD und BIBA-Institution |
+| `list_biba_publications` | Liest die Publikationsliste des Instituts (~2100 Einträge ab 2005) und filtert sie nach einer Person | https://www.biba.uni-bremen.de/forschung/publikationen.html |
+| `search_publications` | Sucht Veröffentlichungen einer Person und lädt Open-Access-PDFs herunter | der Reihe nach: BIBA-Liste, Google Scholar (`scholarly`), OpenAlex mit Filter auf ORCID-iD und BIBA-Institution |
 | `summarize_pdf` | Extrahiert den Text einer PDF und erstellt Zusammenfassung plus Keywords | `pypdf`, extraktive Zusammenfassung |
 | `summarize_text` | Dasselbe für einen Text, z. B. ein Abstract | |
 
-Drei Dinge sind bewusst so gelöst:
+Vier Dinge sind bewusst so gelöst:
+
+* **Die Liste des Instituts kommt zuerst.** Das BIBA pflegt seine
+  [Publikationsliste](https://www.biba.uni-bremen.de/forschung/publikationen.html)
+  selbst – damit stammt die Zuordnung Person → Veröffentlichung vom Institut und
+  nicht aus einem Namensabgleich. Namensvettern gibt es hier gar nicht erst.
+
+  Ein einziger Abruf liefert **alle** rund 2100 Einträge ab 2005 (der
+  Jahresfilter der Seite steht von Haus aus auf „alle“), deshalb wird die Seite
+  einmal geholt und im Prozess behalten. Ohne diesen Zwischenspeicher zöge eine
+  Indexierung 86-mal 2,1 MB. Jeder Eintrag hat denselben Aufbau:
+
+  ```html
+  <p>
+    Panter, L.; Petzoldt, C.; Freitag, M.<br>
+    <strong>Gamification zur Akzeptanzsteigerung industrieller Exoskelette</strong><br>
+    In: Zeitschrift für wirtschaftlichen Fabrikbetrieb, 120(2025)6, De Gruyter, pp. 451-456<br>
+    [<a href="https://doi.org/10.1515/zwf-2025-1066">DOI</a> | <a href="javascript:showBibTeXpopover('…')">BibTeX</a>]
+  </p>
+  ```
+
+  Das Jahr wird aus dem BibTeX-Block gelesen, nicht aus der Quellenangabe – dort
+  klemmt es als `120(2025)6` zwischen Band und Heft. Den BibTeX kodiert die Seite
+  fürs `onclick`-Attribut um (`/#/` statt Zeilenumbruch, `/#q/` statt `\"`);
+  `_bibtex_entzerren()` macht das rückgängig. Die Gegenrichtung steht als
+  JavaScript in der Seite selbst.
+
+* **Die Liste nennt keinen Inhalt – OpenAlex reicht ihn nach.** Weder Abstracts
+  noch Keywords stehen auf der Seite, und genau die braucht das Ranking. Zwei
+  Durchgänge mit je *einer* Anfrage (OpenAlex verodert Filterwerte mit `|`):
+  erst über die DOI, dann über den Titel für alles, was noch leer ist. Der
+  zweite Durchgang ist kein Luxus – nur gut 40 % der Einträge haben eine DOI,
+  und gerade bei den neuesten Arbeiten mancher Personen fehlt sie. Mit beiden
+  Durchgängen bekommen 116 von 145 ausgewählten Titeln Inhalt (80 %), mit dem
+  DOI-Durchgang allein wären es 94.
+
+  Weil `title.search` unscharf sucht, wird jeder Treffer über die
+  Wortüberlappung des Titels gegengeprüft, bevor etwas übernommen wird. Sonst
+  hinge irgendwann ein fremdes Abstract an einer Publikation.
 
 * **Namen sind keine Schlüssel – ORCID schon.** „Michael Freitag“ gibt es in der
   Wissenschaft mehrfach, „Marco Franke“ auch. Eine reine Namenssuche mischt die
@@ -767,9 +808,14 @@ Drei Dinge sind bewusst so gelöst:
   `scholarly` bekommt in der Praxis schnell einen Captcha. Der Server versucht
   Scholar mit Zeitlimit und weicht auf [OpenAlex](https://openalex.org) aus.
   OpenAlex ist frei, liefert Abstracts, Keywords und PDF-Fundorte, und der
-  Filter auf die BIBA-Institution vermeidet Namensvettern. Der Agent merkt sich
-  eine Scholar-Sperre und nutzt für den restlichen Lauf direkt OpenAlex.
-  Mit `RESEARCH_SOURCE=openalex` überspringst du Scholar von vornherein.
+  Filter auf die BIBA-Institution vermeidet Namensvettern.
+
+  Seit die BIBA-Liste vorn steht, kommt Scholar nur noch für Personen ohne
+  Eintrag dort an die Reihe – meist Verwaltung und Technik, wo es ohnehin nichts
+  findet. Damit nicht jede davon in das 40-Sekunden-Zeitlimit läuft, merkt sich
+  der Agent eine Sperre und überspringt Scholar für den Rest des Laufs. Wichtig
+  dabei: Er schaltet nur *Scholar* ab, nicht die ganze Kette – sonst fiele die
+  BIBA-Liste für alle weiteren Personen mit weg.
 * **Die Zusammenfassung ist extraktiv, ohne Sprachmodell.** Sie wählt die
   Sätze mit den häufigsten Fachwörtern und liefert die häufigsten Wörter und
   Wortpaare als Keywords. Das ist deterministisch und schnell genug, um beim
@@ -803,6 +849,10 @@ Keyword-Profil. Beim Start passiert Folgendes:
    nicht in der Datei sind: `search_publications` (mit der iD), dann pro
    Veröffentlichung `summarize_pdf` oder `summarize_text`. Nach jeder Person
    wird gespeichert, ein Abbruch verliert also nichts.
+
+   Von den 86 Mitarbeitenden stehen 53 in der Publikationsliste des BIBA; für
+   die restlichen – überwiegend Verwaltung und Technik – greifen Scholar und
+   OpenAlex.
 
    Der ORCID-Abgleich läuft *vor* dem Überspringen bereits bekannter Personen –
    sonst bliebe das mitgelieferte Gedächtnis für immer ohne ORCID-Angaben. Auch
@@ -900,7 +950,7 @@ falsch geschrieben) und die Art der Frage an Stichwörtern:
 | `RESEARCH_INDEX_AT_STARTUP` | `1` | `0` lädt nur die Datei und indexiert nicht nach |
 | `RESEARCH_MAX_STAFF` | `0` (alle) | Nur die ersten N Personen indexieren, praktisch zum Ausprobieren |
 | `RESEARCH_MAX_PUBS` | `3` | Veröffentlichungen pro Person |
-| `RESEARCH_SOURCE` | `auto` | `scholar`, `openalex` oder `auto` (Scholar, bei Sperre OpenAlex) |
+| `RESEARCH_SOURCE` | `auto` | `auto` (BIBA-Liste, dann Scholar, dann OpenAlex), sonst `biba`, `scholar`, `openalex` |
 | `RESEARCH_MEMORY_FILE` | `memory/forschungsindex.json` | Gedächtnis-Datei |
 | `RESEARCH_DOWNLOAD_DIR` | `downloads` | Ordner für PDFs |
 | `RESEARCH_ORCID` | `1` | `0` schaltet den ORCID-Abgleich ab; gesucht wird dann nur über den Namen |
@@ -913,7 +963,7 @@ Zum schnellen Ausprobieren:
 
 ```bash
 set RESEARCH_MAX_STAFF=10
-set RESEARCH_SOURCE=openalex
+set RESEARCH_SOURCE=biba
 python agents_server.py
 ```
 
@@ -1367,7 +1417,8 @@ Es ist MCP-SDK Version 1 installiert. Dieses Projekt nutzt Version 2
 
 **Research-Agent: `Google Scholar nicht nutzbar (MaxTriesExceededException)`**
 Scholar blockt die Anfragen. Das ist normal und kein Fehler: Der Agent nutzt
-OpenAlex. Wer Scholar gar nicht erst probieren will, setzt `RESEARCH_SOURCE=openalex`.
+die BIBA-Liste und OpenAlex. Wer Scholar gar nicht erst probieren will, setzt
+`RESEARCH_SOURCE=biba`.
 
 **Research-Agent: `Ich habe keine bekannte Person im Text gefunden`**
 Entweder ist der Name nicht auf der BIBA-Seite, oder das Gedächtnis ist noch
