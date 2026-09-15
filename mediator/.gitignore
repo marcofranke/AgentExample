@@ -1,0 +1,3 @@
+# Das JAR wird nicht eingecheckt (rund 110 MB). Es entsteht im Mediator-Repo
+# mit `mvn clean package` und wird hierher kopiert - siehe Dockerfile.
+semanticmediator.jar

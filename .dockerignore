@@ -24,3 +24,7 @@ README.md
 CLAUDE.md
 LICENSE
 docker-compose.yml
+
+# Der Mediator ist ein eigener Dienst mit eigenem Dockerfile (mediator/Dockerfile).
+# Vor allem das ~110 MB grosse semanticmediator.jar hat im Agenten-Image nichts zu suchen.
+mediator/
