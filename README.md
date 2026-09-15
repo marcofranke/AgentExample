@@ -7,7 +7,7 @@ Dieses Projekt zeigt Schritt für Schritt, wie mehrere Agenten über das
 |------|--------------|---------|
 | 1 | Drei einfache Agenten laufen auf einem Server. Ein Client (Agent A) findet sie über ihre „Visitenkarte“ und schickt ihnen Nachrichten. | `agents_server.py`, `Agent A.py`, `*Agent.py`, `*AgentExecutor.py` |
 | 2 | Ein Orchestrator (Agent C) hat selbst keine Fachlogik. Ein **lokales LLM** entscheidet anhand der Skill-Beschreibungen, welcher Agent zuständig ist, und der Orchestrator delegiert die Anfrage per A2A. | `agent_c_orchestrator.py` |
-| 3 | Drei Agenten, die **externe Dienste** anbinden: aktuelles Wetter (Open-Meteo), Ontologie-Suche (OLS4, LOV) und der **Semantische Mediator des BIBA**. | `WeatherAgent.py`, `OntologySearchAgent.py`, `SemanticMediatorAgent.py` |
+| 3 | Drei Agenten, die **externe Dienste** anbinden: aktuelles Wetter (Open-Meteo), Ontologie-Suche (OLS4, LOV) und der **Semantische Mediator des BIBA** – Letzterer läuft als zweiter Container im selben Compose-Stack. | `WeatherAgent.py`, `OntologySearchAgent.py`, `SemanticMediatorAgent.py`, `mediator/` |
 | 4 | Ein **komplexer Agent mit MCP-Server und Gedächtnis**: kennt die BIBA-Mitarbeitenden und ihre Veröffentlichungen, schlägt Reviewer vor, erstellt Forschungsprofile und beantwortet Fragen zu Personen. | `biba_mcp_server.py`, `ResearchAgent.py` |
 
 Das Tutorial folgt der PDF `A2A-Tutorial-Orchestrator-LLM.pdf`, weicht aber an
@@ -151,7 +151,7 @@ AgentExample/
 ├── web_ui.py                  # Die Web-Routen (/, /api/agents, /api/query)
 ├── web/index.html             # Die Seite selbst
 ├── Dockerfile                 # CPU-Image, ohne CUDA, ohne eingebackenes Modell
-├── docker-compose.yml         # Betrieb auf einem Server ohne GPU
+├── docker-compose.yml         # Zwei Dienste: Agenten + Semantischer Mediator
 ├── agents_server.py           # Startet EINEN Server, der alle Agenten hostet
 ├── Agent A.py                 # Einfacher Client: ruft Greeter und Adder direkt auf
 ├── agent_c_orchestrator.py    # LLM-Orchestrator: lässt ein lokales LLM routen
@@ -169,6 +169,9 @@ AgentExample/
 ├── OntologySearchAgentExecutor.py
 ├── SemanticMediatorAgent.py   # Agent H: Semantischer Mediator des BIBA
 ├── SemanticMediatorAgentExecutor.py
+├── mediator/                  # Der Mediator selbst als zweiter Container
+│   ├── Dockerfile             #   Image aus dem fertigen semanticmediator.jar
+│   └── config/                #   config.xml + Beispiel-Datenquelle (SCADA/)
 │
 ├── biba_mcp_server.py         # MCP-Server: Mitarbeitende, Publikationen, PDF-Zusammenfassung
 ├── ResearchAgent.py           # Agent I: MCP-Client, Gedächtnis, Reviewer/Profil/Fragen
@@ -244,7 +247,7 @@ Erwartete Ausgabe:
 [Server] Agent E – Subtractor     -> http://127.0.0.1:9999/subtractor  (Skill: subtract)
 [Server] Agent F – Weather        -> http://127.0.0.1:9999/weather  (Skill: weather)
 [Server] Agent G – Ontology Search -> http://127.0.0.1:9999/ontology  (Skill: ontology_search)
-[Server] Agent H – Semantic Mediator -> http://127.0.0.1:9999/mediator  (Skill: semantic_mediation)
+[Server] Agent H – Semantic Mediator -> http://127.0.0.1:9999/mediator  (Skill: mediator_status)
 [Server] Agent I – Research       -> http://127.0.0.1:9999/research  (Skill: find_reviewer)
 INFO:     Uvicorn running on http://127.0.0.1:9999
 [Research] Gedächtnis geladen: 0 Personen, 0 indexiert (memory\forschungsindex.json)
@@ -368,7 +371,7 @@ Erwartete Ausgabe:
 [Orchestrator] Gefunden: Agent E – Subtractor – Skills: subtract
 [Orchestrator] Gefunden: Agent F – Weather – Skills: weather
 [Orchestrator] Gefunden: Agent G – Ontology Search – Skills: ontology_search
-[Orchestrator] Gefunden: Agent H – Semantic Mediator – Skills: semantic_mediation
+[Orchestrator] Gefunden: Agent H – Semantic Mediator – Skills: mediator_status, mediator_query, mediator_graphql, mediator_transform, mediator_schema, mediator_admin
 [Orchestrator] Gefunden: Agent I – Research – Skills: find_reviewer, staff_profile, staff_question
 
 === Eingabe: Was ist 20 minus 8?
@@ -470,7 +473,9 @@ Diese Eingaben zeigen, wie das Routing entscheidet:
 | `Addiere 1, 2 und 3` | `add`, aber der Agent meldet `FAILED` (drei Zahlen) |
 | `Wie ist das Wetter in Bremen?` | `weather` |
 | `Welche Ontologien gibt es für Sensoren?` | `ontology_search` |
-| `Welche Datenmodelle kennt der Mediator?` | `semantic_mediation` |
+| `Welche Datenquellen kennt der Mediator?` | `mediator_status` |
+| `Exportiere Konfiguration 1 als CSV` | `mediator_transform` |
+| `Frage den Mediator: select ?B where { ?A a <Observation>. ?A <dateTime> ?B. }` | `mediator_query` |
 | `Wer sollte ein Paper über Predictive Maintenance reviewen?` | `find_reviewer` |
 | `Erstelle das Forschungsprofil von Karl Hribernik` | `staff_profile` |
 | `Wie erreiche ich Michael Freitag?` | `staff_question` |
@@ -548,49 +553,123 @@ Sichten. Hintergrund: [A Semantic Mediator for Data Integration in Autonomous
 Logistics Processes](https://link.springer.com/chapter/10.1007/978-1-84996-257-5_15)
 und [Semantic Interoperability for Logistics and Beyond](https://link.springer.com/chapter/10.1007/978-3-030-88662-2_6).
 
-Der Mediator ist **kein öffentlicher Dienst**. Der Agent spricht deshalb eine
-eigene Instanz an, deren Adresse per Umgebungsvariable gesetzt wird:
+Der Mediator ist **kein öffentlicher Dienst**, sondern eine eigene Spring-Boot-
+Anwendung (Java 8). Sie läuft im `docker-compose.yml` dieses Projekts als
+zweiter Container neben den Agenten – siehe [Abschnitt 9](#9-weboberfläche-und-betrieb-im-container).
+Außerhalb von Docker wird die Adresse per Umgebungsvariable gesetzt:
 
 ```bash
-set SEMANTIC_MEDIATOR_URL=http://localhost:8080      # Windows
-set SEMANTIC_MEDIATOR_TOKEN=...                       # optional, Bearer-Token
+set SEMANTIC_MEDIATOR_URL=http://127.0.0.1:8081       # Windows
+set SEMANTIC_MEDIATOR_TOKEN=...                        # optional, Bearer-Token
+set SEMANTIC_MEDIATOR_NAMESPACE=http://www.levelup-project.eu/ontologies
 # export ... unter Linux / macOS
 python agents_server.py
 ```
 
-Ohne gesetzte URL meldet der Agent jeden Task als `FAILED` mit einem
-klaren Hinweis. Der Agent versteht zwei Aufträge:
+Ohne gesetzte URL meldet der Agent jeden Task als `FAILED` mit einem klaren
+Hinweis.
+
+#### Die Rollenteilung
+
+Genau wie der Research-Agent seine Daten nicht selbst holt, integriert dieser
+Agent keine Daten selbst. Die Arbeit macht der Mediator:
 
 ```
->>> Welche Datenmodelle kennt der Mediator?
-Bekannte Datenmodelle des Mediators:
-  • ERP
-  • AAS
-
->>> Transformiere von ERP nach AAS: {"artikelnummer": "4711", "menge": 3}
-Transformation ERP -> AAS:
-{ ... Antwort des Mediators im Zielmodell ... }
+Datenquellen (CSV, JSON, REST, SQL, InfluxDB)
+   └─> Wrapper (je ein Mapping von Quellfeldern auf Ontologiekonzepte)
+        └─> Mediator: führt die Sichten zu EINEM virtuellen Schema zusammen
+             └─> SPARQL / GraphQL darüber, Export als CSV, JSON, AAS, Submodell
 ```
 
-**Anpassen an die eigene Installation.** Die REST-Schnittstelle des Mediators
-ist nicht öffentlich dokumentiert. Deshalb steckt alles, was vom konkreten
-Endpunkt abhängt, in der Klasse `MediatorClient` am Anfang der Datei:
+Im Agenten bleiben drei Dinge: den deutschen Satz verstehen, den passenden
+REST-Endpunkt wählen, die Antwort wieder als Text formulieren.
 
-| Was | Wo | Annahme in diesem Projekt |
-|-----|----|---------------------------|
-| Modelle auflisten | `PFAD_MODELLE` | `GET /models`, Antwort ist Liste von Strings oder Objekten mit `name` |
-| Transformation | `PFAD_TRANSFORM` | `POST /transform` mit `{"sourceModel", "targetModel", "data"}`, Antwort enthält `data` |
-| Authentifizierung | `_headers()` | Bearer-Token aus `SEMANTIC_MEDIATOR_TOKEN`, falls gesetzt |
+#### Die sechs Skills
 
-Weicht die eigene Mediator-Instanz davon ab, muss nur diese Klasse geändert
+Wie Agent I hat Agent H mehrere Skills. Der Orchestrator routet nur *zum
+Agenten*; die Aufteilung auf die Skills macht `auftrag_aus_text()` per Regex.
+
+| Skill | Wofür | Beispielsatz |
+|---|---|---|
+| `mediator_status` | Zustand, Version, registrierte Konfigurationen | `Welche Datenquellen kennt der Mediator?` |
+| `mediator_query` | SPARQL über alle Quellen | `Frage den Mediator: select ?B where { ?A a <Observation>. ?A <dateTime> ?B. }` |
+| `mediator_graphql` | dasselbe, in GraphQL | `GraphQL an den Mediator: { Observation(site: "http://…") { dateTime } }` |
+| `mediator_transform` | Export in ein Zielformat | `Exportiere Konfiguration 1 als CSV`, `Transformiere Konfiguration 1 nach AAS` |
+| `mediator_schema` | Ontologie, Mapping, Datenpfade, Wrapper-Import | `Zeige die Ontologie von Konfiguration 1` |
+| `mediator_admin` | Dienste neu laden, Triple Store, Uploads | `Lade die Dienste des Mediators neu` |
+
+Der rote Faden ist die **`configurationID`** – die `<id>` eines `<Service>` in
+der `config.xml` des Mediators. Ohne sie geht kein Export und kein Reload.
+Deshalb fängt man immer beim Status an:
+
+```
+>>> Welche Datenquellen kennt der Mediator?
+Semantischer Mediator unter http://mediator:8081 ist erreichbar.
+Current Version:  IncludedInDataFederationModule:1.0.9
+Triple Store: echo:http://fuseki:3030/demo, ...
+
+1 registrierte Konfiguration(en):
+  • Konfiguration 1  (Namensraum: http://www.levelup-project.eu/ontologies)
+      Wrapper BigDataCSVWrapper: /config/SCADA/config.properties
+      Query: select ?B ?C ?D ?E where {?A a <Observation>. ...}
+
+Die Zahl hinter 'Konfiguration' ist die configurationID – sie wird für Export,
+Ontologie-Ansicht und Reload gebraucht.
+
+>>> Exportiere Konfiguration 1 als CSV
+Konfiguration 1, transformiert nach CSV:
+dateTime,hasSimplifiedValue,madeBySensor,observedProperty
+1700719200,15.34,urn:uni-bremen:iab:wio:0:0:tcon:0001,temperature
+...
+```
+
+Eine Transformation lässt sich auch mit *mitgelieferten* Daten ausprobieren,
+ohne die echte Quelle anzufassen – der Mediator schickt sie als „virtuelle
+Datenquelle“ durch denselben Wrapper:
+
+```
+>>> Transformiere diese Daten mit Konfiguration 1: timestamp,sensor_id,sensor_type,value,unit
+    1700719200,urn:uni-bremen:iab:wio:0:0:tcon:0001,temperature,15.34,celsius
+```
+
+**Anpassen an die eigene Installation.** Alles, was vom konkreten Endpunkt
+abhängt, steckt als `PFAD_*`-Klassenattribut in `MediatorClient` am Anfang der
+Datei:
+
+| Bereich | Endpunkte |
+|---|---|
+| Zustand | `/hello`, `/version`, `/getCurrentDataSources`, `/getAppliedTripleStore` |
+| Abfragen | `/query` (SPARQL), `/queryPost` (SPARQL → CSV), `/queryGraphQL` |
+| Export | `/forwardRealDataSource`, `/forwardVirtualDataSource2`, `/createVirtualDataSource` |
+| Wrapper | `/import/importWrapperConfiguration`, `/getOntologyFromDataSourceConfiguration`, `/getMappingFromDataSourceConfiguration`, `/requestDataPathesFromWrapper` |
+| Verwaltung | `/reloadServices`, `/reloadSingleService/{id}`, `/setAppliedTripleStore`, `/activateInfluxUpload`, `/deactivateInfluxUpload`, `/publishOnKafka` |
+| Authentifizierung | `_headers()` – Bearer-Token aus `SEMANTIC_MEDIATOR_TOKEN`, falls gesetzt |
+
+Zwei Eigenheiten, über die man beim Nachbauen stolpert und die der Client
+abfängt:
+
+* `/query` will Anfrage **und** Namensraum als ein JSON-Objekt *innerhalb* des
+  `query`-Parameters: `?query={"namespace":"…","query":"select …"}`. Zwei
+  getrennte Parameter versteht der Mediator nicht.
+* Geht etwas schief, antwortet `/query` mit Status 200 und dem Text `null` –
+  nicht mit einem 500er. Der Client macht daraus einen `ValueError` mit einer
+  lesbaren Erklärung, sonst stünde beim Nutzer nur „null“.
+
+Weicht die eigene Mediator-Instanz ab, muss nur `MediatorClient` geändert
 werden. Textverständnis (`auftrag_aus_text`) und A2A-Anbindung bleiben gleich.
 
 ### Teil 3 im Orchestrator
 
 Alle drei Agenten sind in `AGENTS` in `agent_c_orchestrator.py` eingetragen.
-Das LLM sieht damit sechs Skills. Die Skill-Beschreibungen enthalten bewusst
-Stichwörter wie „Wetter“, „Ontologie“ und „transformieren“, damit ein kleines
-Modell die Anfragen sauber trennen kann.
+Das LLM sieht damit elf Skills – Agent H bringt allein sechs mit. Die
+Skill-Beschreibungen enthalten bewusst Stichwörter wie „Wetter“, „Ontologie“,
+„SPARQL“ und „transformieren“, damit ein kleines Modell die Anfragen sauber
+trennen kann.
+
+Dass ein Agent mehrere Skills anbietet, ändert am Routing nichts: Der
+Orchestrator wählt eine `skill_id`, schickt den Text aber an den *Agenten*, und
+der entscheidet intern weiter. Bei Agent H macht das `auftrag_aus_text()`, bei
+Agent I dieselbe Methode – siehe Teil 4.
 
 ---
 
@@ -889,14 +968,77 @@ solange zeigt der Punkt oben rechts „wird geladen“.
 
 ### Docker
 
-Das Image enthält die Agenten und die Oberfläche, **nicht** das Sprachmodell –
-das wären 3 GB extra im Image. Es wird beim ersten Start geladen und liegt
-danach im Volume `hf-cache`.
+Das Compose-File startet **zwei** Dienste in einem gemeinsamen Netz:
+
+| Dienst | Was | Port |
+|---|---|---|
+| `a2a` | die sieben Agenten, der Orchestrator und die Weboberfläche (Python) | 9999 |
+| `mediator` | der Semantische Mediator des BIBA (Spring Boot, Java 8) | 8081 |
+
+Agent H spricht den Mediator unter `http://mediator:8081` an – über den
+Dienstnamen, den Compose im Netz `a2a-netz` als DNS-Namen einträgt. Der Port
+8081 ist nach außen nur gemappt, damit sich der Mediator auch von Hand prüfen
+lässt (`curl "http://localhost:8081/hello?name=test"`); die Agenten brauchen
+das Mapping nicht.
+
+Das Agenten-Image enthält die Agenten und die Oberfläche, **nicht** das
+Sprachmodell – das wären 3 GB extra im Image. Es wird beim ersten Start geladen
+und liegt danach im Volume `hf-cache`.
 
 ```bash
-docker compose up -d          # startet ghcr.io/marcofranke/agentexample:latest
+docker compose up -d          # beide Dienste
 docker compose logs -f        # beim Hochfahren zusehen
 ```
+
+`a2a` wartet über `depends_on: condition: service_healthy`, bis der Mediator
+antwortet – Spring braucht nach dem Start des Containers noch rund eine Minute.
+Wer nur die Agenten will (die übrigen sechs brauchen den Mediator nicht, und
+Agent H meldet dann einen sauberen Fehler):
+
+```bash
+docker compose up -d --no-deps a2a
+```
+
+#### Das Mediator-Image
+
+Voreingestellt ist das fertige Image aus der BIBA-Registry, das die GitLab-CI
+des Mediator-Repos baut. Ohne Zugang dorthin baut man es selbst. Der Quellcode
+wird dabei **nicht** im Container übersetzt: Der Mediator hängt an internen
+SNAPSHOT-Artefakten (`de.biba.reasoning.mediator`, `de.biba.wrapper.*`), die
+nur aus dem BIBA-Netz erreichbar sind. Stattdessen wird das fertige JAR
+hineinkopiert:
+
+```powershell
+cd C:\Users\fma\git\semanticmediator
+mvn clean package                        # `clean` ist dort Pflicht, nicht optional
+copy target\semanticmediator.jar C:\Users\fma\PycharmProjects\AgentExample2\mediator\
+```
+
+Danach im `docker-compose.yml` beim Dienst `mediator` die Zeile `image:`
+auskommentieren und die beiden `build:`-Zeilen einkommentieren.
+
+#### Was der Mediator mitbringt
+
+`mediator/config/` wird als `/config` in den Container gehängt und enthält eine
+lauffähige Beispiel-Konfiguration:
+
+* `config.xml` – die registrierten Dienste. Der `<Service>` mit `<id>1</id>` ist
+  die Konfiguration, nach der Agent H fragt.
+* `SCADA/` – eine CSV-Datenquelle mit Sensormesswerten, dazu Ontologie (`.owl`),
+  Mapping (`.xml`) und `config.properties` des Wrappers.
+
+Die `config.xml` ist bewusst **beschreibbar** gemountet und eingecheckt: Der
+Mediator schreibt hinein, sobald über `/import/importWrapperConfiguration` ein
+neuer Wrapper hochgeladen wird. Sie ist der Ausgangszustand, nicht nur eine
+Vorlage – dasselbe Prinzip wie beim Gedächtnis des Research-Agenten. Die
+importierten Wrapper-Ordner selbst landen im Volume `mediator-wrappers`.
+
+In dieser Demo gibt es weder Fuseki noch InfluxDB noch Kafka. Alle drei Uploads
+stehen deshalb im Compose-File auf `false`, sonst liefe jede Anfrage in einen
+Timeout. Über Agent H lassen sie sich zur Laufzeit wieder einschalten
+(`Aktiviere den Influx-Upload des Mediators`).
+
+#### Kompatibilität und Variablen
 
 Das Compose-File läuft mit Compose v2 (`docker compose`) und mit dem alten
 `docker-compose` v1. Deshalb stehen dort `version: "2.4"` und `mem_limit`
@@ -904,10 +1046,17 @@ statt `deploy.resources` – v1 braucht das eine und ignoriert das andere.
 Compose v2 weist beim Start darauf hin, dass `version` überflüssig ist; das
 ist nur ein Hinweis, kein Fehler.
 
-`HF_TOKEN`, `SEMANTIC_MEDIATOR_URL` und `SEMANTIC_MEDIATOR_TOKEN` werden aus
-dem aufrufenden Terminal durchgereicht oder aus einer `.env`-Datei neben dem
-Compose-File gelesen. Sind sie nicht gesetzt, bleiben sie im Container leer –
-für den Standardbetrieb wird keine davon gebraucht.
+`HF_TOKEN` und `SEMANTIC_MEDIATOR_TOKEN` werden aus dem aufrufenden Terminal
+durchgereicht oder aus einer `.env`-Datei neben dem Compose-File gelesen. Sind
+sie nicht gesetzt, bleiben sie im Container leer – für den Standardbetrieb wird
+keine davon gebraucht. `SEMANTIC_MEDIATOR_URL` steht dagegen fest im
+Compose-File, weil der Dienstname im internen Netz immer derselbe ist.
+
+Die Eigenschaften des Mediators stehen im Compose-File **doppelt**: einmal in
+Punktschreibweise (`influx.upload=false`), einmal in Großbuchstaben
+(`INFLUX_UPLOAD=false`). Nur die zweite Form kommt zuverlässig als
+Umgebungsvariable bei Spring an; die erste steht daneben, weil sie so im
+Java-Quellcode als `@Value` auftaucht und damit auffindbar bleibt.
 
 Ziehen ohne Compose:
 
@@ -1109,7 +1258,36 @@ Die Umgebungsvariable muss im Terminal gesetzt sein, in dem der
 
 **Mediator-Agent: `404` oder unerwartete Antwort**
 Die Pfade oder das Nachrichtenformat der eigenen Mediator-Instanz weichen von
-den Annahmen ab. Anpassen in `MediatorClient` in `SemanticMediatorAgent.py`.
+den Annahmen ab. Anpassen in `MediatorClient` in `SemanticMediatorAgent.py`;
+dort stehen alle Endpunkte als `PFAD_*`-Konstanten beieinander.
+
+**Mediator-Agent: `Semantischer Mediator nicht erreichbar`**
+Der Container braucht nach dem Start noch rund eine Minute, bis Spring den Port
+öffnet. `docker compose ps` zeigt, ob `a2a-mediator` schon `healthy` ist;
+`docker compose logs mediator` zeigt den Fortschritt. Von Hand prüfen:
+
+```bash
+curl "http://localhost:8081/hello?name=test"
+```
+
+**Mediator-Agent: `Der Mediator hat kein Ergebnis geliefert`**
+Der Mediator antwortet auf eine fehlgeschlagene Anfrage mit Status 200 und dem
+Text `null`; der Agent macht daraus diese Meldung. Fast immer passt der
+Namensraum nicht zur Ontologie der Datenquelle. Welcher gilt, verrät
+`Welche Datenquellen kennt der Mediator?`; im Text setzen lässt er sich mit
+`SPARQL im Namensraum http://… : select …`, dauerhaft über
+`SEMANTIC_MEDIATOR_NAMESPACE`.
+
+**Mediator-Agent: Export liefert nichts, obwohl die Konfiguration existiert**
+Nach einem Wrapper-Import steht der Dienst zwar in der `config.xml`, ist aber
+noch nicht geladen. `Lade Konfiguration <id> im Mediator neu` behebt das.
+
+**Mediator: `docker compose up` scheitert am Image**
+Ohne Zugang zur BIBA-Registry lässt sich
+`reg.biba.uni-bremen.de/meisterwaerme/semanticmediator:latest` nicht ziehen.
+Dann das Image lokal bauen (JAR nach `mediator/` kopieren, `build:` im
+Compose-File einkommentieren) oder nur die Agenten starten:
+`docker compose up -d --no-deps a2a`.
 
 **Research-Agent: `No module named 'mcp.server.fastmcp'`**
 Es ist MCP-SDK Version 1 installiert. Dieses Projekt nutzt Version 2

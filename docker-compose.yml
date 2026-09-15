@@ -1,10 +1,22 @@
-# A2A-Agenten mit Weboberfläche auf einem Server ohne GPU.
+# A2A-Agenten mit Weboberfläche plus Semantischer Mediator, auf einem Server
+# ohne GPU.
 #
 #   docker compose up -d        starten
 #   docker compose logs -f      beim Hochfahren zusehen
 #   docker compose down         stoppen
 #
-# Danach: http://<server>:9999/
+# Danach: http://<server>:9999/       Weboberfläche der Agenten
+#         http://<server>:8081/hello?name=test   Mediator direkt
+#
+# Zwei Dienste in einem Netz:
+#
+#   a2a       die sieben Agenten + Orchestrator + Weboberfläche (Python)
+#   mediator  der Semantische Mediator des BIBA (Spring Boot, Java 8)
+#
+# Agent H spricht den Mediator unter http://mediator:8081 an – über den
+# Dienstnamen, den Compose im gemeinsamen Netz als DNS-Namen einträgt. Der Port
+# 8081 ist nach außen nur gemappt, damit sich der Mediator auch von Hand prüfen
+# lässt; die Agenten brauchen ihn nicht.
 #
 # Der erste Start dauert einige Minuten, weil das Sprachmodell (~3 GB)
 # heruntergeladen wird. Es landet im Volume `hf-cache` und wird danach
@@ -23,21 +35,20 @@ services:
     container_name: a2a-agents
     restart: unless-stopped
 
+    # Erst starten, wenn der Mediator wirklich antwortet (Healthcheck in
+    # mediator/Dockerfile). Ohne `condition` würde Compose nur warten, bis der
+    # Container läuft – Spring braucht danach aber noch eine gute Minute.
+    #
+    # Nur die Agenten, ohne Mediator (die übrigen sechs Agenten brauchen ihn
+    # nicht, und Agent H meldet dann einen sauberen Fehler):
+    #   docker compose up -d --no-deps a2a
+    depends_on:
+      mediator:
+        condition: service_healthy
+
     ports:
       - "9999:9999"
 
-    # Compose legt sonst ein eigenes Netz an. Auf Servern, auf denen schon viele
-    # Compose-Projekte laufen, gehen Docker irgendwann die privaten Adressbereiche
-    # aus ("could not find an available, non-overlapping IPv4 address pool").
-    # Dann hilft `docker network prune` – oder die nächste Zeile: Der Container
-    # hängt sich an die vorhandene Standard-Bridge, ein neues Netz entfällt.
-    # Für diesen Stack aus genau einem Dienst ist das unbedenklich.
-    # network_mode: "bridge"
-
-    # Listenform statt Zuordnung: Ein Eintrag ohne "=" reicht die Variable vom
-    # Host durch, falls sie dort gesetzt ist, und sonst gar nicht. Das kommt
-    # ohne `${VAR:-}` aus – diese Schreibweise mit leerem Vorgabewert lehnt
-    # docker-compose v1 mit "Invalid interpolation format" ab.
     environment:
       # Im Container muss auf allen Adressen gelauscht werden, sonst kommt von
       # außen nichts an. BASE_URL bleibt intern: Unter dieser Adresse ruft der
@@ -45,6 +56,14 @@ services:
       - A2A_HOST=0.0.0.0
       - A2A_PORT=9999
       - A2A_BASE_URL=http://127.0.0.1:9999
+
+      # Agent H – Semantic Mediator. `mediator` ist der Dienstname oben; Compose
+      # löst ihn im Netz `a2a-netz` zur Container-Adresse auf. Der Namensraum ist
+      # die Vorgabe für SPARQL-Anfragen ohne eigene Angabe und passt zur
+      # Beispiel-Datenquelle in mediator/config/.
+      - SEMANTIC_MEDIATOR_URL=http://mediator:8081
+      - SEMANTIC_MEDIATOR_NAMESPACE=http://www.levelup-project.eu/ontologies
+      - SEMANTIC_MEDIATOR_TIMEOUT=120
 
       # CPU-Betrieb: bfloat16 halbiert den Speicherbedarf des Modells von rund
       # 6 GB auf rund 3 GB. Auf sehr alten CPUs ist float32 schneller.
@@ -71,13 +90,14 @@ services:
       # - RESEARCH_MAX_STAFF=10
       # - RESEARCH_SOURCE=openalex
 
-      # Die folgenden drei werden nur durchgereicht, wenn sie im Terminal
-      # gesetzt sind, aus dem heraus `docker compose up` läuft. Kein Token
-      # hier eintragen – sonst steht es im Repo.
+      # Listenform ohne "=": Ein solcher Eintrag reicht die Variable vom Host
+      # durch, falls sie dort gesetzt ist, und sonst gar nicht. Das kommt ohne
+      # `${VAR:-}` aus – diese Schreibweise mit leerem Vorgabewert lehnt
+      # docker-compose v1 mit "Invalid interpolation format" ab.
       # HF_TOKEN nur für gated Modelle auf Hugging Face nötig,
-      # SEMANTIC_MEDIATOR_* nur, wenn Agent H an eine echte Instanz soll.
+      # SEMANTIC_MEDIATOR_TOKEN nur, wenn die Mediator-Instanz eins verlangt.
+      # Kein Token hier eintragen – sonst steht es im Repo.
       - HF_TOKEN
-      - SEMANTIC_MEDIATOR_URL
       - SEMANTIC_MEDIATOR_TOKEN
 
     volumes:
@@ -91,6 +111,9 @@ services:
       # Vorab heruntergeladenes Modell für Server ohne Internet (siehe oben).
       # - ./modell:/modell:ro
 
+    networks:
+      - a2a-netz
+
     # Das Modell braucht Arbeitsspeicher: rund 3 GB mit bfloat16, rund 6 GB mit
     # float32, dazu etwas für Python und die Agenten. Unter 4 GB wird es eng.
     # `mem_limit`/`mem_reservation` statt `deploy.resources` – Letzteres wirkt
@@ -98,7 +121,86 @@ services:
     mem_limit: 6g
     mem_reservation: 4g
 
+  ############################################################################
+  # Semantischer Mediator – das Gegenstück zu Agent H
+  ############################################################################
+  mediator:
+    # Fertiges Image aus der BIBA-Registry (die GitLab-CI des Mediator-Repos
+    # baut und schiebt es dorthin). Ohne Zugang zur Registry stattdessen selbst
+    # bauen: die nächsten beiden Zeilen einkommentieren, das Image-Zeile
+    # auskommentieren und vorher das JAR bereitlegen –
+    #   cd C:\Users\fma\git\semanticmediator && mvn clean package
+    #   copy target\semanticmediator.jar <hier>\mediator\
+    # Warum nicht im Container bauen: siehe mediator/Dockerfile.
+    image: reg.biba.uni-bremen.de/meisterwaerme/semanticmediator:latest
+    # build:
+    #   context: ./mediator
+    container_name: a2a-mediator
+    restart: unless-stopped
+
+    ports:
+      # Nur zum Nachschauen von außen; die Agenten gehen über das interne Netz.
+      - "8081:8081"
+
+    environment:
+      # Das Image bringt server.port=3053 mit (application.yml). SERVER_PORT
+      # überschreibt das – ein Spring-Boot-Mechanismus, kein Docker-Trick.
+      - SERVER_PORT=8081
+
+      # Welche config.xml der Mediator benutzt. Spring akzeptiert dieselbe
+      # Eigenschaft in beiden Schreibweisen; die Punktform steht hier, weil sie
+      # im Quellcode als @Value auftaucht, die Großschreibung, weil nur sie als
+      # Umgebungsvariable sicher ankommt.
+      - falcon.shared.property.config.datafederationmodule=/config/config.xml
+      - FALCON_SHARED_PROPERTY_CONFIG_DATAFEDERATIONMODULE=/config/config.xml
+
+      # Wohin importierte Wrapper-Konfigurationen geschrieben werden
+      # (POST /import/importWrapperConfiguration legt dort je einen UUID-Ordner an).
+      - FALCON_SHARED_PROPERTY_CONFIG_WRAPPERFOLDER=/wrappers
+
+      # In dieser Demo gibt es weder Fuseki noch InfluxDB noch Kafka. Alle drei
+      # Uploads bleiben deshalb aus – sonst läuft jede Anfrage in einen Timeout.
+      # Zur Laufzeit lassen sie sich über Agent H wieder einschalten
+      # ("Aktiviere den Influx-Upload des Mediators").
+      - tripleStore.upload=false
+      - TRIPLESTORE_UPLOAD=false
+      - influx.upload=false
+      - INFLUX_UPLOAD=false
+      - influx.upload.external=false
+      - INFLUX_UPLOAD_EXTERNAL=false
+      - kafka.publish=false
+      - KAFKA_PUBLISH=false
+      - uploadMongo=false
+      - UPLOADMONGO=false
+
+      # Java 8 kennt die Container-Speichergrenze nicht von allein.
+      - _JAVA_OPTIONS=-Xms128m -Xmx1g
+
+    volumes:
+      # Konfiguration und Beispiel-Datenquelle. BEWUSST beschreibbar: Der
+      # Mediator hängt bei einem Wrapper-Import einen neuen <Service> an die
+      # config.xml an. Die Datei ist deshalb eingecheckt wie das Gedächtnis des
+      # Research-Agenten – sie ist der Ausgangszustand, nicht nur eine Vorlage.
+      - ./mediator/config:/config
+      # Importierte Wrapper. Named Volume, weil hier zur Laufzeit beliebig viele
+      # UUID-Ordner entstehen, die nicht ins Repo gehören.
+      - mediator-wrappers:/wrappers
+
+    networks:
+      - a2a-netz
+
+    mem_limit: 2g
+    mem_reservation: 512m
+
+networks:
+  # Ein eigenes Netz für beide Dienste – nur darin löst `mediator` als Name auf.
+  # Auf Servern mit vielen Compose-Projekten gehen Docker irgendwann die privaten
+  # Adressbereiche aus ("could not find an available, non-overlapping IPv4
+  # address pool"). Dann hilft `docker network prune`.
+  a2a-netz:
+
 volumes:
   hf-cache:
   research-memory:
   research-downloads:
+  mediator-wrappers:

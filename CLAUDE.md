@@ -67,15 +67,44 @@ Der einzige Agent mit Gedächtnis und mehreren Skills, und der einzige, der eine
 
 Das Gedächtnis `memory/forschungsindex.json` ist **absichtlich eingecheckt** (`downloads/` dagegen nicht), damit ein Neustart ohne Netz funktioniert.
 
+### Semantic-Mediator-Agent (`SemanticMediatorAgent.py`, `mediator/`)
+
+Der zweite Agent mit mehreren Skills – und der einzige, dessen Gegenstück ein **eigener Container** ist. Der Semantische Mediator ist eine Spring-Boot-Anwendung (Java 8) aus `C:\Users\fma\git\semanticmediator`; `docker-compose.yml` startet ihn als Dienst `mediator` neben den Agenten.
+
+Rollenteilung wie beim Research-Agenten: *Der Agent macht keine Datenintegration.* Föderation, Reasoning über die Ontologie und Export sind Sache des Mediators. Im Agenten bleiben Textverständnis, Endpunktwahl und Sprachausgabe.
+
+`MediatorClient` bündelt **alle** REST-Endpunkte als `PFAD_*`-Klassenattribute; weicht eine Installation ab, wird ausschließlich dort angepasst. Die Endpunkte entsprechen `semanticfederationmoduleServiceController` und `ImportWrapperController` im Java-Projekt:
+
+| Bereich | Endpunkte |
+|---|---|
+| Zustand | `/hello`, `/version`, `/getCurrentDataSources`, `/getAppliedTripleStore` |
+| Abfragen | `/query` (SPARQL, GET), `/queryPost` (SPARQL → CSV), `/queryGraphQL` |
+| Export | `/forwardRealDataSource`, `/forwardVirtualDataSource2`, `/createVirtualDataSource` |
+| Wrapper | `/import/importWrapperConfiguration`, `/getOntologyFromDataSourceConfiguration`, `/getMappingFromDataSourceConfiguration`, `/requestDataPathesFromWrapper` |
+| Verwaltung | `/reloadServices`, `/reloadSingleService/{id}`, `/setAppliedTripleStore`, `/activate*Upload`, `/deactivate*Upload`, `/publishOnKafka` |
+
+Zwei Eigenheiten des Mediators, die der Client abfängt:
+
+* `/query` erwartet Anfrage **und** Namensraum als ein JSON-Objekt *innerhalb* des `query`-Parameters, nicht als zwei Parameter.
+* `/query` und `/queryGraphQL` liefern im Fehlerfall `null` mit Status 200, keinen 500er. Der Client macht daraus einen `ValueError` mit lesbarer Erklärung.
+
+`auftrag_aus_text()` verteilt per Regex auf die sechs Skills (`mediator_status`, `mediator_query`, `mediator_graphql`, `mediator_transform`, `mediator_schema`, `mediator_admin`); der Orchestrator routet nur *zum Agenten*. Die Reihenfolge der Prüfungen ist entscheidend: erst das eindeutig Erkennbare (SPARQL-Text, JSON mit `mappingXml`), zuletzt das Allgemeine (Status). Die `configurationID` aus der `config.xml` ist der rote Faden – ohne sie funktioniert weder Export noch Reload, deshalb gibt der Status-Skill sie prominent aus.
+
+`dienste_aus_config()` parst die `config.xml` des Mediators; `MAX_ZEICHEN` deckelt Antworten, weil ein CSV-Export megabytegroß sein kann.
+
+Der Ordner `mediator/` enthält das Dockerfile, eine lauffähige `config/config.xml` und die Beispiel-Datenquelle `config/SCADA/` (CSV mit Sensormesswerten plus Ontologie und Mapping). Das ~110 MB große `semanticmediator.jar` wird **nicht** eingecheckt – es entsteht im Mediator-Repo mit `mvn clean package` (dort ist `clean` Pflicht) und wird nach `mediator/` kopiert. Ein Build im Container scheitert außerhalb des BIBA-Netzes an internen SNAPSHOT-Artefakten.
+
+`mediator/config/config.xml` ist **absichtlich eingecheckt** – aus demselben Grund wie `memory/forschungsindex.json`. Der Mediator *schreibt* hinein: Ein Wrapper-Import hängt einen weiteren `<Service>` an (mit `id = Anzahl + 1`).
+
 ### Externe Dienste
 
 | Agent | Dienst | Schlüssel nötig |
 |---|---|---|
 | `WeatherAgent` | Open-Meteo (Geocoding + Forecast) | nein |
 | `OntologySearchAgent` | OLS4 (EMBL-EBI) und LOV | nein |
-| `SemanticMediatorAgent` | BIBA-interner Semantic Mediator | `SEMANTIC_MEDIATOR_URL`, optional `SEMANTIC_MEDIATOR_TOKEN` |
+| `SemanticMediatorAgent` | Semantic Mediator, Dienst `mediator` im Compose-Stack | `SEMANTIC_MEDIATOR_URL`, optional `SEMANTIC_MEDIATOR_TOKEN` |
 
-Der Mediator ist nicht öffentlich; ohne gesetzte URL meldet der Agent jeden Task als `FAILED`. Alles endpunktabhängige steckt gekapselt in `MediatorClient` (`PFAD_MODELLE`, `PFAD_TRANSFORM`, `_headers()`) – Anpassungen an eine konkrete Installation gehören ausschließlich dorthin.
+Ohne gesetzte `SEMANTIC_MEDIATOR_URL` meldet Agent H jeden Task als `FAILED` – mit einer Meldung, die die Variable nennt.
 
 ## Konfiguration über Umgebungsvariablen
 
@@ -91,6 +120,10 @@ Alle optional, alle mit Standardwert im Code:
 | `RESEARCH_DOWNLOAD_DIR` | `downloads` | Ordner für PDFs |
 | `OPENALEX_MAILTO` / `OPENALEX_INSTITUTION_ID` | leer / `I4387156409` | OpenAlex „polite pool“ bzw. BIBA-Institution |
 | `SCHOLAR_TIMEOUT` | `40` | Sekunden pro Scholar-Versuch |
+| `SEMANTIC_MEDIATOR_URL` | leer | Basis-URL des Mediators; im Compose-Stack `http://mediator:8081` |
+| `SEMANTIC_MEDIATOR_TOKEN` | leer | optionales Bearer-Token für den Mediator |
+| `SEMANTIC_MEDIATOR_NAMESPACE` | `http://www.levelup-project.eu/ontologies` | Namensraum für SPARQL-Anfragen ohne eigene Angabe |
+| `SEMANTIC_MEDIATOR_TIMEOUT` | `120` | Sekunden pro Mediator-Aufruf (Föderation über viele Quellen dauert) |
 | `HF_TOKEN` | leer | Hugging-Face-Token für den Orchestrator (nötig für gated Modelle wie `google/gemma-2-2b-it`; das Standardmodell ist frei) |
 
 Zugangsdaten stehen in `.env` (per `.gitignore` ausgeschlossen, Vorlage: `.env.example`) und zusätzlich als dauerhafte User-Umgebungsvariable. Das Projekt lädt `.env` **nicht** selbst ein – die Datei dient als Ablage und für die PyCharm-Run-Konfiguration; wirksam ist die Umgebungsvariable.
@@ -102,4 +135,7 @@ Beim Arbeiten am Research-Agenten lohnt sich `RESEARCH_MAX_STAFF=5` und `RESEARC
 * `main.py` ist der Schnellstart: Server und Orchestrator laufen dort in **einem Prozess** und teilen sich eine Event-Loop (uvicorn als Hintergrund-Task, Orchestrator im Vordergrund). Alles Blockierende – Modell laden, `input()` – liegt in Threads, sonst nimmt der Server keine Anfragen mehr an, solange auf eine Eingabe gewartet wird. Wiederverwendbarer Einstieg im Orchestrator: `orchestriere(texte, llm)`; `agent_c_orchestrator.main()` ist nur noch ein Aufruf davon. Die Einzelstarts (`agents_server.py` + `agent_c_orchestrator.py` in zwei Terminals) bleiben unverändert möglich und sind zum Erklären die bessere Variante.
 * `bibtexparser` muss auf Version 1 bleiben (`bibtexparser<2`), sonst startet `scholarly` nicht.
 * Port und Host stehen in `agents_server.py`; eine Änderung erfordert auch `SERVER_URL` in `Agent A.py` und `agent_c_orchestrator.py`.
+* `docker-compose.yml` startet zwei Dienste im Netz `a2a-netz`: `a2a` (Agenten + Weboberfläche, Port 9999) und `mediator` (Semantischer Mediator, Port 8081). Nur im gemeinsamen Netz löst `mediator` als DNS-Name auf – deshalb kein `network_mode: bridge` mehr. Nur die Agenten: `docker compose up -d --no-deps a2a`.
+* Der Mediator hört im Image auf Port 3053 (`application.yml`). Das Compose setzt `SERVER_PORT=8081`; wird das geändert, müssen `SEMANTIC_MEDIATOR_URL`, das Port-Mapping und `ENV SERVER_PORT` in `mediator/Dockerfile` (dort hängt auch der Healthcheck dran) mitgezogen werden.
+* Mediator-Eigenschaften werden im Compose **doppelt** gesetzt – einmal in Punktschreibweise (`influx.upload`), einmal in Großbuchstaben (`INFLUX_UPLOAD`). Nur die zweite Form kommt zuverlässig als Umgebungsvariable bei Spring an; die erste steht dort, weil sie so im Java-Quellcode als `@Value` auftaucht und damit auffindbar bleibt.
 * Wer README-Inhalte ändert (neuer Agent, neue Variable), hält Projektstruktur, Konfigurationstabelle und die Übung in `README.md` mit.

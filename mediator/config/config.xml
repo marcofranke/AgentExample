@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Konfiguration des Semantischen Mediators: Welche Dienste (Konfigurationen)
+  kennt er, und aus welchen Datenquellen speisen sie sich?
+
+  Jeder <Service> hat eine <id> - das ist die "configurationID", nach der Agent H
+  fragt ("Exportiere Konfiguration 1 als CSV"). Die <query> ist die SPARQL-
+  Anfrage, die der Mediator ausfuehrt, wenn die Konfiguration ohne eigene
+  Anfrage abgerufen wird. <DataSource> verweist auf die Wrapper-Konfiguration,
+  die das Mapping von den Quellfeldern auf die Ontologie beschreibt.
+
+  ACHTUNG: Der Mediator SCHREIBT in diese Datei. Wird ueber
+  /import/importWrapperConfiguration ein neuer Wrapper hochgeladen, haengt er
+  hier einen weiteren <Service> an (mit der naechsten freien id) - genauso wie
+  der Research-Agent sein Gedaechtnis fortschreibt. Die Datei ist deshalb
+  bewusst eingecheckt: Sie ist der Ausgangszustand, nicht nur eine Vorlage.
+-->
+<InformationServices>
+
+	<Service>
+		<id>1</id>
+		<query>select ?B ?C ?D ?E where {?A a &lt;Observation&gt;. ?A &lt;dateTime&gt; ?B. ?A &lt;hasSimplifiedValue&gt; ?C. ?A &lt;madeBySensor&gt; ?D. ?A &lt;observedProperty&gt; ?E.}</query>
+		<namespace>http://www.levelup-project.eu/ontologies</namespace>
+		<DataSource>
+			<pathToConfigFile>/config/SCADA/config.properties</pathToConfigFile>
+			<javaClassForWrapper>de.biba.wrapper.tableCSVWrapper.BigDataCSVWrapper</javaClassForWrapper>
+		</DataSource>
+	</Service>
+
+	<!--
+	  Ohne einen erreichbaren Fuseki bleibt der Upload in den Triple Store aus
+	  (tripleStore.upload steht im docker-compose.yml auf false). Der Eintrag
+	  dokumentiert, wohin er ginge.
+	-->
+	<URLOfTripleStore>http://fuseki:3030/demo</URLOfTripleStore>
+</InformationServices>

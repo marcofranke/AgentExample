@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<OverallMapping>
+<GoupMapping>
+<ReadDirection>vertical</ReadDirection>
+    <Range>
+      <header>
+        <startColumn>0</startColumn>
+        <endColumn>1</endColumn>
+        <startRow>0</startRow>
+        <endRow>0</endRow>
+      </header>
+      <data>
+         <startColumn>0</startColumn>
+        <endColumn>1</endColumn>
+        <startRow>1</startRow>
+        <endRow>-1</endRow>
+      </data>
+    </Range>
+<Mapping namespace="http://www.levelup-project.eu/ontologies">
+	<ClassMapping OntClass="Observation">
+		<ID>0</ID>
+	</ClassMapping>
+	
+		<ClassMapping OntClass="ObservableProperty">
+		<ID>2</ID>
+	</ClassMapping>
+	
+	<ClassMapping OntClass="DetachableSensor">
+		<ID>3</ID>
+	</ClassMapping>
+
+  <DatatypePropertyMapping Property="hasSimplifiedValue" Unit="xsd:float">
+    <SubID>0</SubID>
+    <SubClass>Observation</SubClass>
+    <Index>3</Index>
+    
+    
+	
+  </DatatypePropertyMapping>
+    
+  <DatatypePropertyMapping Property="dateTime" Unit="xsd:string">
+    <SubID>0</SubID>
+    <SubClass>Observation</SubClass>
+    <Index>0</Index>
+  </DatatypePropertyMapping>
+	
+	
+	<ObjectPropertyReferenceMapping propertyName="observedProperty">
+<Index>2</Index>
+<SubjectID>0</SubjectID>
+<SubClass>Observation</SubClass>
+<ObjectID>2</ObjectID>
+<ObClass>ObservableProperty</ObClass>
+</ObjectPropertyReferenceMapping>
+<ObjectPropertyReferenceMapping propertyName="madeBySensor">
+<Index>1</Index>
+<SubjectID>0</SubjectID>
+<SubClass>Observation</SubClass>
+<ObjectID>3</ObjectID>
+<ObClass>DetachableSensor</ObClass>
+</ObjectPropertyReferenceMapping>
+	
+</Mapping >
+</GoupMapping>
+</OverallMapping>

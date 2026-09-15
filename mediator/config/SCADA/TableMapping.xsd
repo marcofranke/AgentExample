@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+
+<xsd:complexType name="ObjectPropertyReferenceMapping">
+		<xsd:sequence>
+			<xsd:element name="Index" type="xsd:int"
+				minOccurs="1" maxOccurs="1" />
+			<xsd:element name="AttributeName" type="xsd:string"
+				minOccurs="0" maxOccurs="1" />
+			<xsd:element name="SubjectID" type="xsd:int"
+				minOccurs="1" maxOccurs="1" />
+			<xsd:element name="SubClass" type="xsd:string"
+				minOccurs="1" maxOccurs="1" />
+			<xsd:element name="ObjectID" type="xsd:int" minOccurs="1"
+				maxOccurs="1" />
+			<xsd:element name="ObClass" type="xsd:string"
+				minOccurs="1" maxOccurs="1" />
+
+		</xsd:sequence>
+		<xsd:attribute name="propertyName" type="xsd:string"
+			use="required" />
+	</xsd:complexType>
+
+
+	<xsd:complexType name="ClassMapping">
+		<xsd:annotation></xsd:annotation>
+		<xsd:sequence>
+			<xsd:element name="ID" type="xsd:int" minOccurs="1"
+				maxOccurs="1" />
+			<xsd:element name="Condition" type="Condition"
+				minOccurs="0" maxOccurs="1" />
+		</xsd:sequence>
+		<xsd:attribute name="OntClass" type="xsd:string"
+			use="required" />
+	</xsd:complexType>
+
+	<xsd:complexType name="Condition">
+		<xsd:sequence>
+			<xsd:element name="ColumnNumber" type="xsd:int"
+				minOccurs="1" maxOccurs="1" />
+			<xsd:element name="Value" type="xsd:string" minOccurs="1"
+				maxOccurs="1" />
+			<xsd:element name="Operator" type="comparator"
+				minOccurs="1" maxOccurs="1" />
+		</xsd:sequence>
+		<xsd:attribute name="ValueType" type="xsd:string"
+			use="required" />
+	</xsd:complexType>
+
+	<xsd:simpleType name="comparator">
+		<xsd:restriction base="xsd:string">
+			<xsd:enumeration value="=" />
+			<xsd:enumeration value=">=" />
+			<xsd:enumeration value="&lt;=" />
+			<xsd:enumeration value="&lt;" />
+			<xsd:enumeration value=">" />
+			<xsd:enumeration value="!=" />
+		</xsd:restriction>
+	</xsd:simpleType>
+
+	<xsd:complexType name="DatatypePropertyMapping">
+		<xsd:sequence>
+			<xsd:element name="SubID" type="xsd:int" minOccurs="1"
+				maxOccurs="1" />
+			<xsd:element name="SubClass" type="xsd:string"
+				minOccurs="1" maxOccurs="1" />
+			<xsd:element name="Index" type="xsd:int" minOccurs="1"
+				maxOccurs="100" />
+			
+			<xsd:element name="StatementInsertion"
+				type="StatementInsertion" minOccurs="0" maxOccurs="1000" />
+		</xsd:sequence>
+		<xsd:attribute name="Property" type="xsd:string"
+			use="required" />
+		<xsd:attribute name="Unit" type="xsd:string"
+			use="required" />
+	</xsd:complexType>
+
+	<xsd:complexType name="MergeDatatypePropertyMapping">
+		<xsd:sequence>
+			<xsd:element name="SubID" type="xsd:int" minOccurs="1"
+				maxOccurs="1" />
+			<xsd:element name="SubClass" type="xsd:string"
+				minOccurs="1" maxOccurs="1" />
+			<xsd:element name="Index" type="xsd:int" minOccurs="1"
+				maxOccurs="100" />
+			<xsd:element name="ReferenceRow" type="xsd:int" minOccurs="0" maxOccurs="1" />
+			<xsd:element name="ReferenceColumn" type="xsd:int" minOccurs="0" maxOccurs="1" />
+            <xsd:element name="FromUnit" type="xsd:string" minOccurs="1" maxOccurs="1" />
+            <xsd:element name="function" type="xsd:string"
+				minOccurs="1" maxOccurs="1" />
+			<xsd:element name="StatementInsertion"
+				type="StatementInsertion" minOccurs="0" maxOccurs="1000" />
+		</xsd:sequence>
+		<xsd:attribute name="Property" type="xsd:string"
+			use="required" />
+		<xsd:attribute name="Unit" type="xsd:string"
+			use="required" />
+	</xsd:complexType>
+
+	<xsd:complexType name="StatementInsertion">
+		<xsd:sequence>
+			<xsd:element name="PropertyName" type="xsd:string"
+				minOccurs="1" maxOccurs="1" />
+			<xsd:element name="Value" type="Value" minOccurs="1"
+				maxOccurs="1" />
+		</xsd:sequence>
+
+		<xsd:attribute name="isItObjectProperty"
+			type="xsd:boolean" use="required" />
+	</xsd:complexType>
+
+	<xsd:complexType name="Value">
+		<xsd:sequence>
+			<xsd:element name="ValueAsString" type="xsd:string"
+				minOccurs="1" maxOccurs="1" />
+			<xsd:element name="OntologyClass" type="xsd:string"
+				minOccurs="0" maxOccurs="1" />
+		</xsd:sequence>
+
+	</xsd:complexType>
+
+	<xsd:complexType name="ObjectPropertyMapping">
+		<xsd:sequence>
+			<xsd:element name="ReferenceColumn" type="xsd:string"
+				minOccurs="1" maxOccurs="1" />
+			<xsd:element name="SubjectID" type="xsd:int"
+				minOccurs="1" maxOccurs="1" />
+			<xsd:element name="SubClass" type="xsd:string"
+				minOccurs="1" maxOccurs="1" />
+			<xsd:element name="ObjectID" type="xsd:int" minOccurs="1"
+				maxOccurs="1" />
+			<xsd:element name="ObClass" type="xsd:string"
+				minOccurs="1" maxOccurs="1" />
+
+		</xsd:sequence>
+		<xsd:attribute name="Property" type="xsd:string"
+			use="required" />
+	</xsd:complexType>
+
+
+	<xsd:complexType name="Mapping">
+		<xsd:sequence>
+			
+			<xsd:element name="ClassMapping" type="ClassMapping"
+				minOccurs="0" maxOccurs="unbounded" />
+			<xsd:element name="DatatypePropertyMapping"
+				type="DatatypePropertyMapping" minOccurs="0" maxOccurs="unbounded" />
+			<xsd:element name="MergeDatatypePropertyMapping"
+				type="MergeDatatypePropertyMapping" minOccurs="0"
+				maxOccurs="unbounded" />
+			<xsd:element name="ObjectPropertyMapping"
+				type="ObjectPropertyMapping" minOccurs="0" maxOccurs="unbounded" />
+				<xsd:element name="ObjectPropertyReferenceMapping"
+				type="ObjectPropertyReferenceMapping" minOccurs="0"
+				maxOccurs="unbounded" />
+		</xsd:sequence>
+		<xsd:attribute name="namespace" type="xsd:string" />
+	</xsd:complexType>
+
+	<xsd:complexType name="Rangedefintion">
+		<xsd:sequence>
+			<xsd:element name="header" type="Range"></xsd:element>
+			<xsd:element name="data" type="Range"></xsd:element>
+		</xsd:sequence>
+
+	</xsd:complexType>
+
+
+
+	<xsd:complexType name="Range">
+		<xsd:sequence>
+			<xsd:element name="startColumn" type="xsd:int" />
+			<xsd:element name="endColumn" type="xsd:int" />
+			<xsd:element name="startRow" type="xsd:int" />
+			<xsd:element name="endRow" type="xsd:int" />
+		</xsd:sequence>
+	</xsd:complexType>
+
+	<xsd:simpleType name="readDirection" final="restriction">
+		<xsd:restriction base="xsd:string">
+			<xsd:enumeration value="horizontal" />
+			<xsd:enumeration value="vertical" />
+		</xsd:restriction>
+	</xsd:simpleType>
+
+	<xsd:complexType name="GoupMapping">
+
+		<xsd:sequence>
+			
+			<xsd:element name="ReadDirection" type="readDirection"></xsd:element>
+			<xsd:element name="Range" type="Rangedefintion"
+				minOccurs="0" maxOccurs="1"></xsd:element>
+			<xsd:element name="Mapping" type="Mapping" minOccurs="1"
+				maxOccurs="1" />
+			
+		</xsd:sequence>
+	</xsd:complexType>
+
+
+
+	<xsd:element name="OverallMapping">
+		<xsd:complexType>
+			<xsd:sequence>
+				<xsd:element name="GoupMapping" type="GoupMapping"
+					minOccurs="1" maxOccurs="unbounded" />
+			</xsd:sequence>
+		</xsd:complexType>
+	</xsd:element>
+
+
+</xsd:schema>
