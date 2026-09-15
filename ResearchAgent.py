@@ -4,11 +4,20 @@ Der Agent hat drei Skills und ein Gedächtnis:
 
   * Gedächtnis (Memory): Beim Hochfahren holt der Agent über den MCP-Server
     (biba_mcp_server.py) alle Mitarbeitenden von der BIBA-Webseite, sucht zu
-    jeder Person die Veröffentlichungen, lädt PDFs herunter, lässt sie
-    zusammenfassen und legt pro Person ein Forschungsprofil (Keywords) ab.
-    Das Ergebnis wird als JSON gespeichert, damit ein Neustart schnell ist.
+    jedem Namen die ORCID-iD, sucht damit die Veröffentlichungen, lädt PDFs
+    herunter, lässt sie zusammenfassen und legt pro Person ein Forschungsprofil
+    (Keywords) ab. Das Ergebnis wird als JSON gespeichert, damit ein Neustart
+    schnell ist.
   * Skill "find_reviewer": Zu einer Review-Anfrage (Titel, Abstract oder
-    PDF-Pfad) die passendsten Gutachter:innen aus dem Gedächtnis auswählen.
+    PDF-Pfad) IMMER ZWEI Gutachter:innen aus dem Gedächtnis auswählen –
+    Erst- und Zweitgutachten, wie im Peer-Review üblich.
+
+Warum der Umweg über ORCID: Der Name von der BIBA-Webseite ist als Suchschlüssel
+mehrdeutig. "Michael Freitag" oder "Marco Franke" gibt es in der Wissenschaft
+mehrfach, und eine reine Namenssuche mischt deren Arbeiten zusammen – was direkt
+die Reviewer-Auswahl verfälscht. Das MCP-Tool `find_orcid` sucht den Namen
+deshalb bei ORCID und nimmt nur das Profil, in dem das BIBA als Einrichtung
+steht. Erst diese iD identifiziert die Person.
   * Skill "staff_profile": Forschungsprofil einer Person zusammenstellen.
   * Skill "staff_question": Weitere Fragen zu einer Person beantworten
     (Kontakt, Themen, Veröffentlichungen, Ko-Autor:innen ...).
@@ -23,6 +32,8 @@ Umgebungsvariablen (alle optional):
     RESEARCH_SOURCE            "auto" (Standard), "scholar" oder "openalex"
     RESEARCH_MEMORY_FILE       Pfad der Gedächtnis-Datei (Standard memory/forschungsindex.json)
     RESEARCH_DOWNLOAD_DIR      Ordner für PDFs (Standard downloads/)
+    RESEARCH_ORCID             "1" (Standard) gleicht Namen gegen ORCID ab, "0" schaltet das ab
+    RESEARCH_REVIEWER          Anzahl der Reviewer-Vorschläge (Standard 2)
 """
 
 import asyncio
@@ -329,9 +340,10 @@ class ResearchAgent:
             id="find_reviewer",
             name="Find Reviewer",
             description=(
-                "Wählt zu einer Review-Anfrage (Titel, Abstract oder PDF-Pfad eines Papers) die "
-                "passendsten Gutachter:innen (Reviewer) unter den BIBA-Mitarbeitenden aus, basierend "
-                "auf deren Veröffentlichungen."
+                "Wählt zu einer Review-Anfrage (Titel, Abstract oder PDF-Pfad eines Papers) immer "
+                "genau ZWEI Gutachter:innen (Reviewer) unter den BIBA-Mitarbeitenden aus, basierend "
+                "auf deren Veröffentlichungen. Zwei Meinungen sind im Peer-Review der Normalfall; "
+                "Autor:innen des Papers werden ausgeschlossen."
             ),
             input_modes=["text/plain"],
             output_modes=["text/plain"],
@@ -339,7 +351,7 @@ class ResearchAgent:
             examples=[
                 "Review-Anfrage: Semantic interoperability for predictive maintenance in wind turbines",
                 "Wer sollte dieses Paper reviewen? C:/papers/eingereicht.pdf",
-                "Finde einen Reviewer für ein Paper über digitale Zwillinge in der Logistik",
+                "Finde zwei Reviewer für ein Paper über digitale Zwillinge in der Logistik",
             ],
         ),
         AgentSkill(
@@ -386,6 +398,12 @@ class ResearchAgent:
         self.max_staff = int(os.environ.get("RESEARCH_MAX_STAFF", "0"))
         self.max_pubs = int(os.environ.get("RESEARCH_MAX_PUBS", "3"))
         self.quelle = os.environ.get("RESEARCH_SOURCE", "auto")
+        # ORCID-Abgleich beim Indexieren. `0` spart einen HTTP-Aufruf pro Person,
+        # macht die Publikationssuche aber wieder anfällig für Namensvettern.
+        self.orcid_suchen = os.environ.get("RESEARCH_ORCID", "1") == "1"
+        # Wie viele Reviewer vorgeschlagen werden. Zwei ist der Normalfall im
+        # Peer-Review: eine Zweitmeinung, ohne dass der Vorschlag ausufert.
+        self.anzahl_reviewer = int(os.environ.get("RESEARCH_REVIEWER", "2"))
         self._index_task: asyncio.Task | None = None
 
     # ---- AgentCard ---------------------------------------------------------
@@ -435,19 +453,34 @@ class ResearchAgent:
                 personen = personen[: self.max_staff]
             # Personen, die nicht mehr auf der Webseite stehen (oder umbenannt wurden), vergessen
             aktuelle = {p["name"] for p in personen}
-            for alt in [n for n in self.gedaechtnis.personen if n not in aktuelle]:
+            entfernt = [n for n in self.gedaechtnis.personen if n not in aktuelle]
+            for alt in entfernt:
                 del self.gedaechtnis.personen[alt]
+            if entfernt:
+                # Der TF-IDF-Index zeigt sonst weiter auf die gelöschten Namen. Das
+                # fällt erst bei der nächsten Rangliste auf – und auch nur dann,
+                # wenn danach niemand mehr neu indexiert wird (denn das baut den
+                # Index ohnehin neu). Tritt z. B. mit RESEARCH_MAX_STAFF auf.
+                self.gedaechtnis._index_neu_bauen()
             status["gesamt"] = len(personen)
             status["indexiert"] = sum(1 for p in personen if self.gedaechtnis.personen.get(p["name"], {}).get("indexiert_am"))
             quelle = self.quelle
+            orcid_nachgetragen = False
             for i, stamm in enumerate(personen, 1):
                 eintrag = self.gedaechtnis.person_anlegen(stamm)
+                # Die ORCID-iD wird auch für längst indexierte Personen nachgetragen.
+                # Sie kostet einen einzigen Aufruf und wird im Gedächtnis vermerkt;
+                # stünde sie erst hinter dem `continue`, bliebe das mitgelieferte
+                # Gedächtnis für immer ohne diese Angabe.
+                if await self._orcid_holen(eintrag):
+                    orcid_nachgetragen = True
                 if eintrag.get("indexiert_am"):
                     continue  # schon aus der Datei bekannt
                 print(f"[Research] ({i}/{len(personen)}) {stamm['name']} ...")
                 try:
                     ergebnis = await self.mcp.call(
-                        "search_publications", autor=stamm["name"], max_results=self.max_pubs, quelle=quelle
+                        "search_publications", autor=stamm["name"], max_results=self.max_pubs,
+                        quelle=quelle, orcid=eintrag.get("orcid", ""),
                     )
                 except RuntimeError as err:
                     status["hinweise"].append(f"{stamm['name']}: {err}")
@@ -460,15 +493,56 @@ class ResearchAgent:
                     await self._zusammenfassen(pub)
                 self.gedaechtnis.publikationen_setzen(stamm["name"], publikationen, ergebnis.get("hinweis", ""))
                 status["indexiert"] += 1
+                orcid_nachgetragen = False  # ist mitgespeichert worden
+                self.gedaechtnis.speichern()
+            if orcid_nachgetragen:
+                # Alle waren schon indexiert, es gab also kein Speichern in der
+                # Schleife – die neu gefundenen ORCID-iDs sollen trotzdem bleiben.
                 self.gedaechtnis.speichern()
             status["phase"] = "fertig"
-            print(f"[Research] Indexierung fertig: {status['indexiert']} Personen mit Veröffentlichungen geprüft.")
+            mit_orcid = sum(1 for p in self.gedaechtnis.personen.values() if p.get("orcid"))
+            print(f"[Research] Indexierung fertig: {status['indexiert']} Personen mit Veröffentlichungen "
+                  f"geprüft, {mit_orcid} davon mit ORCID-iD am BIBA.")
         except asyncio.CancelledError:
             status["phase"] = "abgebrochen"
             raise
         except Exception as err:  # noqa: BLE001
             status["phase"] = f"Fehler: {err}"
             print(f"[Research] Indexierung abgebrochen: {err}")
+
+    async def _orcid_holen(self, eintrag: dict) -> bool:
+        """Trägt die ORCID-iD einer Person nach. True, wenn dabei etwas Neues entstand.
+
+        Der Name von der BIBA-Webseite ist als Suchschlüssel unzuverlässig –
+        "Michael Freitag" gibt es in der Wissenschaft mehrfach. Das MCP-Tool
+        `find_orcid` sucht den Namen deshalb bei ORCID und nimmt nur das Profil,
+        in dem das BIBA als Einrichtung steht. Diese iD identifiziert dann in
+        `search_publications` die Person statt bloß ihren Namen.
+
+        Das Ergebnis wird im Gedächtnis vermerkt – auch ein *negatives*
+        (`orcid_geprueft_am` ohne `orcid`). Sonst würde bei jedem Serverstart
+        erneut für alle ~86 Personen bei ORCID angefragt.
+        """
+        if not self.orcid_suchen or eintrag.get("orcid_geprueft_am"):
+            return False
+        try:
+            gefunden = await self.mcp.call(
+                "find_orcid",
+                name=eintrag["name"],
+                vorname=eintrag.get("vorname", ""),
+                nachname=eintrag.get("nachname", ""),
+            )
+        except RuntimeError as err:
+            # Kein Abbruch: Ohne ORCID läuft die Suche über den Namen weiter.
+            self.gedaechtnis.status["hinweise"].append(f"ORCID {eintrag['name']}: {err}")
+            return False
+        eintrag["orcid"] = gefunden.get("orcid", "")
+        eintrag["orcid_url"] = gefunden.get("url", "")
+        eintrag["orcid_hinweis"] = gefunden.get("hinweis", "")
+        eintrag["orcid_geprueft_am"] = datetime.now().isoformat(timespec="seconds")
+        if eintrag["orcid"]:
+            print(f"[Research] ORCID {eintrag['name']}: {eintrag['orcid']} ({gefunden.get('institution', '')})")
+        return True
 
     async def _zusammenfassen(self, pub: dict) -> None:
         """PDF bevorzugt, sonst Abstract. Ergebnis landet in der Publikation selbst."""
@@ -543,18 +617,35 @@ class ResearchAgent:
         # Autor:innen des Papers sollen es nicht selbst begutachten
         ausschluss = self._genannte_personen(autoren_text)
 
-        treffer = self.gedaechtnis.rangliste(anfrage, top=3, ausschluss=ausschluss)
+        # Immer genau zwei Vorschläge – eine Erst- und eine Zweitbegutachtung.
+        treffer = self.gedaechtnis.rangliste(anfrage, top=self.anzahl_reviewer, ausschluss=ausschluss)
         zeilen = kopf + ["", self._index_hinweis()]
         if not treffer:
             zeilen.append("Keine passenden Reviewer im Gedächtnis gefunden.")
             return "\n".join(zeilen)
-        zeilen.append("Vorgeschlagene Reviewer:")
+
+        rollen = ["Erstgutachten", "Zweitgutachten"]
+        zeilen.append(f"Vorgeschlagene Reviewer ({len(treffer)} von {self.anzahl_reviewer}):")
         for i, t in enumerate(treffer, 1):
             p = t["person"]
-            zeilen.append(f"  {i}. {p['name']} (Abt. {p.get('abteilung', '?')}, {p.get('email', '')}) – Score {t['score']}")
+            rolle = f" – {rollen[i - 1]}" if i <= len(rollen) else ""
+            orcid = f", ORCID {p['orcid']}" if p.get("orcid") else ""
+            zeilen.append(
+                f"  {i}. {p['name']} (Abt. {p.get('abteilung', '?')}, {p.get('email', '')}{orcid})"
+                f" – Score {t['score']}{rolle}"
+            )
             zeilen.append(f"     passende Begriffe: {', '.join(t['begruendung'])}")
             for pub in self.gedaechtnis.passende_publikationen(p, anfrage, top=2):
                 zeilen.append(f"     • {pub.get('jahr', '?')}: {pub.get('titel', '')}")
+
+        if len(treffer) < self.anzahl_reviewer:
+            # Ehrlich bleiben: lieber eine Person nennen und das sagen, als eine
+            # zweite ohne inhaltliche Überschneidung dazuzuerfinden.
+            fehlend = self.anzahl_reviewer - len(treffer)
+            zeilen.append(
+                f"Nur {len(treffer)} statt {self.anzahl_reviewer} Vorschläge: Für {fehlend} weitere "
+                "gibt es im Gedächtnis keine Person mit inhaltlicher Überschneidung zum Paper."
+            )
         if ausschluss:
             zeilen.append(f"Ausgeschlossen (als Autor:in erkannt): {', '.join(sorted(ausschluss))}")
         return "\n".join(zeilen)
@@ -581,8 +672,12 @@ class ResearchAgent:
             f"Forschungsprofil: {p.get('titel', '')} {p['name']}".replace("  ", " ").strip(),
             f"Abteilung {p.get('abteilung', '?')} · Raum {p.get('raum', '?')} · {p.get('telefon', '')} · {p.get('email', '')}",
             f"Homepage: {p.get('homepage', '')}",
-            "",
         ]
+        if p.get("orcid_url"):
+            zeilen.append(f"ORCID: {p['orcid_url']}")
+        elif p.get("orcid_hinweis"):
+            zeilen.append(f"ORCID: keine am BIBA gefunden ({p['orcid_hinweis']})")
+        zeilen.append("")
         if not pubs:
             zeilen.append("Noch keine Veröffentlichungen im Gedächtnis. " + self._index_hinweis())
             if p.get("quelle_hinweis"):

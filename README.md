@@ -689,10 +689,16 @@ ist anders gebaut:
                           A2A                        MCP (stdio)
 Orchestrator / Agent A  ───────▶  Agent I – Research  ───────────▶  biba_mcp_server.py
                                   │  Gedächtnis (JSON)              │  list_biba_staff      → biba.uni-bremen.de
-                                  │  TF-IDF-Ranking                 │  search_publications  → Google Scholar / OpenAlex
-                                  │  Skills: reviewer/profil/frage  │  summarize_pdf        → pypdf, extraktiv
-                                  └───────────────────────────────  │  summarize_text
+                                  │  TF-IDF-Ranking                 │  find_orcid           → orcid.org
+                                  │  Skills: reviewer/profil/frage  │  search_publications  → Google Scholar / OpenAlex
+                                  └───────────────────────────────  │  summarize_pdf        → pypdf, extraktiv
+                                                                    │  summarize_text
 ```
+
+Die Kette beim Indexieren ist dabei bewusst dreistufig: Der **Name** kommt von
+der BIBA-Webseite, die **Identität** von ORCID, die **Veröffentlichungen** von
+OpenAlex. Jeder Schritt schärft den vorigen – ohne ORCID würde der Agent
+Namensvettern mitindexieren und darauf Reviewer vorschlagen.
 
 ### Der MCP-Server (`biba_mcp_server.py`)
 
@@ -715,11 +721,47 @@ if __name__ == "__main__":
 | Werkzeug | Was es tut | Quelle |
 |----------|-----------|--------|
 | `list_biba_staff` | Liest die Mitarbeitertabelle der BIBA-Webseite: Name, Titel, Rolle, E-Mail, Telefon, Raum, Abteilung, Homepage | https://www.biba.uni-bremen.de/institut/mitarbeiterinnen.html |
-| `search_publications` | Sucht Veröffentlichungen einer Person und lädt Open-Access-PDFs herunter | Google Scholar (`scholarly`), bei Sperre automatisch OpenAlex mit Filter auf die BIBA-Institution |
+| `find_orcid` | Sucht die ORCID-iD zu einem Namen und nimmt das Profil, in dem das BIBA steht | https://orcid.org/ |
+| `search_publications` | Sucht Veröffentlichungen einer Person und lädt Open-Access-PDFs herunter | Google Scholar (`scholarly`), bei Sperre automatisch OpenAlex mit Filter auf ORCID-iD und BIBA-Institution |
 | `summarize_pdf` | Extrahiert den Text einer PDF und erstellt Zusammenfassung plus Keywords | `pypdf`, extraktive Zusammenfassung |
 | `summarize_text` | Dasselbe für einen Text, z. B. ein Abstract | |
 
-Zwei Dinge sind bewusst so gelöst:
+Drei Dinge sind bewusst so gelöst:
+
+* **Namen sind keine Schlüssel – ORCID schon.** „Michael Freitag“ gibt es in der
+  Wissenschaft mehrfach, „Marco Franke“ auch. Eine reine Namenssuche mischt die
+  Arbeiten mehrerer Personen zusammen, und das verfälscht direkt die
+  Reviewer-Auswahl. `find_orcid` sucht den Namen deshalb bei
+  [ORCID](https://orcid.org/) und nimmt nur das Profil, in dem das BIBA als
+  Einrichtung steht. Zwei Fallstricke dabei:
+
+  * *Die ORCID-Suche ist großzügig.* Die Anfrage „Karl Hribernik“ liefert auch
+    eine Person namens „Subrat Kumar Dang“ – die sogar am BIBA sitzt. Das
+    BIBA-Kriterium allein würde also den Falschen wählen. Geprüft werden deshalb
+    immer beide Bedingungen: Name **und** Einrichtung.
+  * *Ohne BIBA-Bestätigung bleibt die iD leer.* Profile ganz ohne
+    Einrichtungsangabe werden verworfen, auch wenn der Name eindeutig ist. Eine
+    falsche iD wäre schlimmer als keine: Ohne iD sucht `search_publications`
+    weiter über den Namen, mit falscher iD fände es gar nichts.
+
+  In `search_publications` kommt die iD **zusätzlich** zum BIBA-Filter zum
+  Einsatz, nicht an seiner Stelle – OpenAlex hat an manchen ORCID-iDs fremde
+  Arbeiten hängen. Für Marco Franke: 80 Arbeiten nur über die iD (darunter
+  Chemie-Aufsätze eines Namensvetters), 27 mit beidem.
+
+  *Warum hier kein BeautifulSoup zum Einsatz kommt:* `orcid.org` ist eine
+  Angular-Anwendung. Die Trefferliste
+  (`/orcid-search/search?searchQuery=Marco+Franke`) und jede Profilseite
+  (`/0000-0003-1570-0168`) liefern **denselben** 65 KB großen Rumpf mit einem
+  leeren `<app-root>` – kein Name, keine Einrichtung, kein JSON-LD. Die Inhalte
+  holt erst das JavaScript im Browser nach. Ein HTML-Parser findet dort
+  buchstäblich nichts. Abgefragt wird deshalb genau die Adresse, die die
+  Webseite selbst benutzt, sobald jemand ins Suchfeld tippt:
+  `pub.orcid.org/v3.0/expanded-search/`. Das Ergebnis ist dasselbe, was im
+  Browser in der Trefferliste steht – nur schon als JSON statt erst nach dem
+  Rendern. Das ist übrigens ein Muster, das man beim Scrapen ständig trifft:
+  Bevor man einen Parser gegen eine Seite schreibt, lohnt der Blick, ob die
+  Seite ihre Daten nicht selbst irgendwo als JSON holt.
 
 * **Google Scholar blockt Skripte.** Scholar hat keine offizielle API, und
   `scholarly` bekommt in der Praxis schnell einen Captcha. Der Server versucht
@@ -756,10 +798,17 @@ Keyword-Profil. Beim Start passiert Folgendes:
 
 1. `beim_start()` lädt die Datei `memory/forschungsindex.json`, falls vorhanden.
 2. Der MCP-Server wird gestartet.
-3. Ein Hintergrund-Task ruft `list_biba_staff` auf und geht alle Personen durch,
-   die noch nicht in der Datei sind: `search_publications`, dann pro
+3. Ein Hintergrund-Task ruft `list_biba_staff` auf und sucht zu jedem Namen mit
+   `find_orcid` die ORCID-iD. Anschließend geht er alle Personen durch, die noch
+   nicht in der Datei sind: `search_publications` (mit der iD), dann pro
    Veröffentlichung `summarize_pdf` oder `summarize_text`. Nach jeder Person
    wird gespeichert, ein Abbruch verliert also nichts.
+
+   Der ORCID-Abgleich läuft *vor* dem Überspringen bereits bekannter Personen –
+   sonst bliebe das mitgelieferte Gedächtnis für immer ohne ORCID-Angaben. Auch
+   ein *negatives* Ergebnis wird vermerkt (`orcid_geprueft_am` ohne `orcid`),
+   sonst würde jeder Serverstart erneut für alle ~86 Personen bei ORCID
+   anfragen. Abschalten: `RESEARCH_ORCID=0`.
 4. Der Server nimmt währenddessen schon Anfragen an. Jede Antwort enthält den
    Stand, z. B. `[Gedächtnis: 40/86 Personen indexiert, Phase: läuft]`.
 
@@ -776,7 +825,7 @@ Ausgabe nennt die Begriffe, die den Ausschlag gaben.
 
 ### Die drei Skills
 
-**1. `find_reviewer`: Reviewer für ein Paper vorschlagen**
+**1. `find_reviewer`: immer zwei Reviewer für ein Paper vorschlagen**
 
 Eingabe ist ein Titel, ein Abstract oder der Pfad einer PDF. Bei einer PDF
 ruft der Agent `summarize_pdf` auf und nutzt Zusammenfassung und Keywords als
@@ -785,18 +834,35 @@ genannt werden, gelten als Autor:innen und werden ausgeschlossen. Bei
 Preprints ohne Autorenzeile im extrahierten Text greift das nicht, dann den
 Namen einfach mit in die Anfrage schreiben.
 
+Vorgeschlagen werden **immer genau zwei** Personen – Erst- und Zweitgutachten,
+wie im Peer-Review üblich. Über `RESEARCH_REVIEWER` lässt sich die Zahl ändern.
+
 ```
->>> Review-Anfrage: Semantic interoperability and data infrastructure for predictive maintenance of wind turbines
-Paper: Semantic interoperability and data infrastructure for predictive maintenance of wind turbines
-[Gedächtnis: 86/86 Personen indexiert, Phase: fertig]
-Vorgeschlagene Reviewer:
-  1. Stephan Oelker (Abt. 9, oel@biba.uni-bremen.de) – Score 0.22
-     passende Begriffe: wind, maintenance, turbines, predictive, data
-     • 2019: Machine learning-based icing prediction on wind turbines
-  2. Karl Hribernik (Abt. 2.2, hri@biba.uni-bremen.de) – Score 0.148
-     passende Begriffe: infrastructure, interoperability, data, semantic
-     • 2026: Data infrastructure approach for information interoperability for the use of AI ...
+>>> Review-Anfrage: Semantic interoperability for predictive maintenance in wind turbines
+Paper: Semantic interoperability for predictive maintenance in wind turbines
+[Gedächtnis: 87/87 Personen indexiert, Phase: fertig]
+Vorgeschlagene Reviewer (2 von 2):
+  1. Marco Franke (Abt. 2.2, fma@biba.uni-bremen.de, ORCID 0000-0003-1570-0168) – Score 0.252 – Erstgutachten
+     passende Begriffe: interoperability, predictive, maintenance, wind, semantic
+     • 2025: Service Injection for Predictive Maintenance in Wind Turbine-Specific Digital Twins
+     • 2024: Interoperable Information Flow as Enabler for Efficient Predictive Maintenance
+  2. Kay Burow (Abt. 2.2, bow@biba.uni-bremen.de) – Score 0.206 – Zweitgutachten
+     passende Begriffe: maintenance, wind, predictive
+     • 2025: Service Injection for Predictive Maintenance in Wind Turbine-Specific Digital Twins
 ```
+
+Reicht es inhaltlich nur für eine Person, wird das gesagt statt aufgefüllt:
+
+```
+Vorgeschlagene Reviewer (1 von 2):
+  1. Kay Burow (Abt. 2.2, bow@biba.uni-bremen.de) – Score 0.267 – Erstgutachten
+     ...
+Nur 1 statt 2 Vorschläge: Für 1 weitere gibt es im Gedächtnis keine Person mit
+inhaltlicher Überschneidung zum Paper.
+```
+
+Eine zweite Person ohne fachliche Überschneidung zu nennen, wäre in einem
+Gutachterverfahren schlicht falsch – lieber eine ehrliche Lücke.
 
 **2. `staff_profile`: Forschungsprofil einer Person**
 
@@ -837,6 +903,9 @@ falsch geschrieben) und die Art der Frage an Stichwörtern:
 | `RESEARCH_SOURCE` | `auto` | `scholar`, `openalex` oder `auto` (Scholar, bei Sperre OpenAlex) |
 | `RESEARCH_MEMORY_FILE` | `memory/forschungsindex.json` | Gedächtnis-Datei |
 | `RESEARCH_DOWNLOAD_DIR` | `downloads` | Ordner für PDFs |
+| `RESEARCH_ORCID` | `1` | `0` schaltet den ORCID-Abgleich ab; gesucht wird dann nur über den Namen |
+| `RESEARCH_REVIEWER` | `2` | Wie viele Reviewer `find_reviewer` vorschlägt |
+| `ORCID_BIBA_PATTERN` | `\bbiba\b\|bremer institut` | Regex, an der im ORCID-Profil die BIBA-Zugehörigkeit erkannt wird |
 | `OPENALEX_MAILTO` | leer | E-Mail für den schnelleren „polite pool“ von OpenAlex |
 | `SCHOLAR_TIMEOUT` | `40` | Sekunden, die ein Scholar-Versuch höchstens dauern darf |
 
@@ -1303,6 +1372,25 @@ OpenAlex. Wer Scholar gar nicht erst probieren will, setzt `RESEARCH_SOURCE=open
 **Research-Agent: `Ich habe keine bekannte Person im Text gefunden`**
 Entweder ist der Name nicht auf der BIBA-Seite, oder das Gedächtnis ist noch
 leer (siehe Phase in der Meldung). Nachname reicht, z. B. „Profil von Hribernik“.
+
+**Research-Agent: `ORCID: keine am BIBA gefunden`**
+Kein Fehler. Entweder hat die Person kein ORCID-Profil (bei Verwaltung und
+Technik die Regel), oder ihr Profil nennt keine Einrichtung – dann wird es
+bewusst verworfen, weil eine falsche iD schlechter wäre als keine. Die
+Publikationssuche läuft in dem Fall wie bisher über den Namen. Nennt das Profil
+das BIBA unter einer ungewöhnlichen Schreibweise, hilft `ORCID_BIBA_PATTERN`.
+
+**Research-Agent: Nach dem Update stehen im Gedächtnis keine ORCID-iDs**
+Der Abgleich läuft nur, wenn auch indexiert wird. Mit
+`RESEARCH_INDEX_AT_STARTUP=0` (die Vorgabe im Container) passiert nichts. Einmal
+mit `RESEARCH_INDEX_AT_STARTUP=1` starten genügt – es werden nur die iDs
+nachgetragen, die Veröffentlichungen bleiben unangetastet.
+
+**Research-Agent: `find_reviewer` liefert nur einen Vorschlag**
+Im Gedächtnis gibt es zu dem Thema nur eine Person mit inhaltlicher
+Überschneidung. Der Agent schreibt das aus, statt eine fachfremde zweite Person
+zu nennen. Ein breiter indexiertes Gedächtnis (höheres `RESEARCH_MAX_PUBS`,
+kein `RESEARCH_MAX_STAFF`) erhöht die Trefferzahl.
 
 **Research-Agent: Antworten enthalten `Phase: läuft`**
 Die Indexierung läuft noch im Hintergrund. Antworten sind bereits möglich, aber

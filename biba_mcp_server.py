@@ -6,6 +6,7 @@ Kindprozess des Agenten und spricht über stdin/stdout (Transport "stdio").
 
 Werkzeuge:
     list_biba_staff        Mitarbeitende von der BIBA-Webseite holen
+    find_orcid             ORCID-iD einer Person suchen, BIBA-Profil auswählen
     search_publications    Veröffentlichungen einer Person suchen und PDFs laden
     summarize_pdf          Zusammenfassung + Keywords zu einer PDF-Datei
     summarize_text         dasselbe für einen Text (z. B. ein Abstract)
@@ -19,6 +20,11 @@ Publikationsquellen:
        API und blockt Skripte häufig. Deshalb mit Zeitlimit und ...
     2. ... OpenAlex (https://openalex.org) als zuverlässige, freie Ausweichquelle
        mit Filter auf die BIBA-Institution, Abstracts, Keywords und Open-Access-PDFs.
+
+Namensgleichheit ist das Hauptproblem beim Indexieren: "Michael Freitag" gibt es
+mehrfach in der Wissenschaft. Deshalb wird zu jedem Namen von der BIBA-Webseite
+zuerst die ORCID-iD gesucht (`find_orcid`) und für die Publikationssuche
+mitgegeben – sie identifiziert die Person statt nur ihren Namen.
 """
 
 import asyncio
@@ -41,6 +47,15 @@ OPENALEX_WORKS = "https://api.openalex.org/works"
 # OpenAlex-ID von "Bremer Institut für Produktion und Logistik GmbH"
 OPENALEX_BIBA_ID = os.environ.get("OPENALEX_INSTITUTION_ID", "I4387156409")
 OPENALEX_MAILTO = os.environ.get("OPENALEX_MAILTO", "")
+
+# ORCID: eindeutige Forschenden-ID. Siehe Tool "find_orcid" für die Erklärung,
+# warum hier nicht orcid.org selbst, sondern pub.orcid.org abgefragt wird.
+ORCID_BASE = "https://orcid.org/"
+ORCID_SUCHE = "https://pub.orcid.org/v3.0/expanded-search/"
+# Woran eine BIBA-Zugehörigkeit im ORCID-Profil zu erkennen ist. In den Daten
+# stehen beide Schreibweisen: "BIBA - Bremer Institut für Produktion und
+# Logistik GmbH" und "Bremer Institut für Produktion und Logistik GmbH".
+ORCID_BIBA_MUSTER = os.environ.get("ORCID_BIBA_PATTERN", r"\bbiba\b|bremer institut")
 
 SCHOLAR_TIMEOUT = float(os.environ.get("SCHOLAR_TIMEOUT", "40"))
 DOWNLOAD_DIR = Path(os.environ.get("RESEARCH_DOWNLOAD_DIR", "downloads"))
@@ -77,6 +92,22 @@ def name_teile(anzeige: str) -> dict:
         "rolle": rolle.strip(),
         "name": f"{rufname.strip() or vorname.strip()} {nachname.strip()}".strip(),
     }
+
+
+_UMLAUTE = {"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss", "é": "e", "è": "e", "ê": "e",
+            "á": "a", "à": "a", "â": "a", "í": "i", "ó": "o", "ò": "o", "ú": "u", "ñ": "n", "ç": "c"}
+
+
+def normal(text: str) -> str:
+    """Kleinschreibung ohne Umlaute und Sonderzeichen – für robuste Namensvergleiche.
+
+    ORCID-Profile werden von Menschen gepflegt, entsprechend uneinheitlich sind
+    sie: "Böse" steht dort mal als "Böse", mal als "Boese", mal als "Bose".
+    """
+    text = text.lower()
+    for alt, neu in _UMLAUTE.items():
+        text = text.replace(alt, neu)
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
 
 
 def abstract_aus_index(inverted: dict | None) -> str:
@@ -143,7 +174,108 @@ async def list_biba_staff(abteilung: str = "") -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Tool 2: Veröffentlichungen suchen und herunterladen
+# Tool 2: ORCID-iD einer Person finden
+# ---------------------------------------------------------------------------
+# Warum nicht die HTML-Seite von orcid.org?
+#
+# orcid.org ist eine Angular-Anwendung. Sowohl die Trefferliste
+# (/orcid-search/search?searchQuery=...) als auch jede Profilseite
+# (/0000-0003-1570-0168) liefern denselben 65-KB-Rumpf mit einem leeren
+# <app-root>: kein Name, keine Einrichtung, kein JSON-LD. Die Daten holt erst
+# das JavaScript im Browser nach. Ein BeautifulSoup-Parser findet dort also
+# buchstäblich nichts – nachgemessen, nicht vermutet.
+#
+# Abgefragt wird deshalb genau die Adresse, die die Webseite selbst benutzt,
+# sobald jemand im Suchfeld tippt. Das Ergebnis ist dasselbe, was im Browser
+# in der Trefferliste steht, nur schon als JSON statt erst nach dem Rendern.
+def _ist_biba(institutionen: list[str]) -> bool:
+    """Steht in einer der Einrichtungen des Profils das BIBA?"""
+    return any(re.search(ORCID_BIBA_MUSTER, normal(i)) for i in institutionen)
+
+
+def _name_passt(treffer: dict, vorname: str, nachname: str) -> bool:
+    """Gehört der ORCID-Treffer überhaupt zu der gesuchten Person?
+
+    Nötig, weil die ORCID-Suche großzügig ist: Die Anfrage "Karl Hribernik"
+    liefert auch eine Person namens "Subrat Kumar Dang" – und die ist sogar am
+    BIBA. Ohne Namensprüfung würde das BIBA-Kriterium allein den Falschen
+    auswählen.
+    """
+    familie = normal(treffer.get("family-names") or "")
+    gegeben = normal(treffer.get("given-names") or "")
+    if not familie or normal(nachname) not in familie.split():
+        return False
+    ruf = normal(vorname).split()
+    if not ruf:
+        return True
+    # Vorname ausgeschrieben ("Marco") oder als Initial ("M.")
+    return any(t == ruf[0] or (len(t) == 1 and t == ruf[0][:1]) for t in gegeben.split())
+
+
+@mcp.tool()
+async def find_orcid(name: str, vorname: str = "", nachname: str = "", max_treffer: int = 20) -> dict:
+    """Sucht die ORCID-iD einer Person und nimmt die, die am BIBA sitzt.
+
+    Die ORCID-Suche liefert zu einem Namen viele Personen weltweit. Ausgewählt
+    wird nur, wer *beides* erfüllt: Der Name passt (Nachname und Vorname bzw.
+    Initial), und in den hinterlegten Einrichtungen steht das BIBA. Trifft das
+    auf niemanden zu, bleibt `orcid` leer – dann hat die Person entweder kein
+    ORCID-Profil oder ihr Profil nennt das BIBA nicht.
+
+    Liefert {"orcid", "url", "name", "institution", "hinweis", "kandidaten"}.
+    `kandidaten` enthält alle namentlich passenden Treffer mit ihren
+    Einrichtungen – zum Nachvollziehen, warum die Wahl so ausfiel.
+    """
+    vorname = vorname or name.rsplit(" ", 1)[0]
+    nachname = nachname or name.rsplit(" ", 1)[-1]
+    leer = {"orcid": "", "url": "", "name": "", "institution": "", "kandidaten": []}
+
+    async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                                 follow_redirects=True) as http:
+        try:
+            antwort = await http.get(ORCID_SUCHE, params={"q": name, "start": 0, "rows": max_treffer})
+            antwort.raise_for_status()
+            treffer = antwort.json().get("expanded-result") or []
+        except httpx.HTTPError as err:
+            return {**leer, "hinweis": f"ORCID nicht erreichbar ({type(err).__name__})"}
+        except ValueError:
+            return {**leer, "hinweis": "ORCID hat keine JSON-Antwort geliefert"}
+
+    kandidaten = [
+        {
+            "orcid": t.get("orcid-id", ""),
+            "name": " ".join(filter(None, [t.get("given-names"), t.get("family-names")])),
+            "institutionen": t.get("institution-name") or [],
+        }
+        for t in treffer
+        if _name_passt(t, vorname, nachname)
+    ]
+    if not kandidaten:
+        return {**leer, "hinweis": f"ORCID kennt niemanden namens {name}"}
+
+    vom_biba = [k for k in kandidaten if _ist_biba(k["institutionen"])]
+    if not vom_biba:
+        return {
+            **leer,
+            "kandidaten": kandidaten,
+            "hinweis": f"{len(kandidaten)} Namensträger bei ORCID, aber keiner nennt das BIBA",
+        }
+
+    gewaehlt = vom_biba[0]
+    institution = next((i for i in gewaehlt["institutionen"] if re.search(ORCID_BIBA_MUSTER, normal(i))), "")
+    hinweis = "" if len(vom_biba) == 1 else f"{len(vom_biba)} BIBA-Profile gefunden, das erste genommen"
+    return {
+        "orcid": gewaehlt["orcid"],
+        "url": ORCID_BASE + gewaehlt["orcid"],
+        "name": gewaehlt["name"],
+        "institution": institution,
+        "hinweis": hinweis,
+        "kandidaten": kandidaten,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool 3: Veröffentlichungen suchen und herunterladen
 # ---------------------------------------------------------------------------
 def _scholar_suche(autor: str, max_results: int) -> list[dict]:
     """Blockierender Google-Scholar-Aufruf (läuft in einem Thread)."""
@@ -171,10 +303,18 @@ def _scholar_suche(autor: str, max_results: int) -> list[dict]:
     return ergebnisse
 
 
-async def _openalex_suche(http: httpx.AsyncClient, autor: str, max_results: int, nur_biba: bool) -> list[dict]:
+async def _openalex_suche(
+    http: httpx.AsyncClient, autor: str, max_results: int, nur_biba: bool, orcid: str = ""
+) -> list[dict]:
     # Kommas trennen bei OpenAlex die Filter, Doppelpunkte Feld und Wert: aus dem Namen entfernen
     autor = re.sub(r"[,:|]", " ", autor).strip()
-    filter_teile = [f"raw_author_name.search:{autor}"]
+    # Mit ORCID-iD wird nach der *Person* gesucht statt nach einer Zeichenkette.
+    # Das findet auch Arbeiten, die "M. Franke" oder "Franke, Marco" schreiben.
+    # Der BIBA-Filter bleibt trotzdem aktiv: OpenAlex hat an manchen ORCID-iDs
+    # fremde Arbeiten hängen (bei 0000-0003-1570-0168 z. B. Chemie-Aufsätze
+    # eines Namensvetters). Erst beide Bedingungen zusammen ergeben ein sauberes
+    # Ergebnis – nachgeprüft: 80 Arbeiten nur über ORCID, 27 mit beidem.
+    filter_teile = [f"author.orcid:{ORCID_BASE}{orcid}"] if orcid else [f"raw_author_name.search:{autor}"]
     if nur_biba and OPENALEX_BIBA_ID:
         filter_teile.append(f"authorships.institutions.lineage:{OPENALEX_BIBA_ID}")
     params = {
@@ -242,12 +382,16 @@ async def _pdf_laden(http: httpx.AsyncClient, urls: list[str], ziel: Path) -> st
 
 @mcp.tool()
 async def search_publications(
-    autor: str, max_results: int = 5, download: bool = True, quelle: str = "auto", nur_biba: bool = True
+    autor: str, max_results: int = 5, download: bool = True, quelle: str = "auto",
+    nur_biba: bool = True, orcid: str = ""
 ) -> dict:
     """Sucht Veröffentlichungen einer Person und lädt verfügbare PDFs herunter.
 
     quelle: "auto" (erst Google Scholar, bei Fehler OpenAlex), "scholar" oder "openalex".
     nur_biba: bei OpenAlex nur Arbeiten mit BIBA-Zugehörigkeit (vermeidet Namensvettern).
+    orcid: ORCID-iD aus `find_orcid`. Ist sie gesetzt, sucht OpenAlex nach der
+        Person statt nach dem Namen – deutlich treffsicherer. Google Scholar
+        kennt keine ORCID-Suche und arbeitet weiter mit dem Namen.
     Liefert {"quelle", "hinweis", "publikationen": [{titel, jahr, autoren, venue,
     abstract, keywords, url, pdf_url, pdf_pfad, quelle}]}.
     """
@@ -267,9 +411,11 @@ async def search_publications(
 
     async with httpx.AsyncClient(timeout=60, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as http:
         if not publikationen and quelle in ("auto", "openalex"):
-            publikationen = await _openalex_suche(http, autor, max_results, nur_biba)
+            publikationen = await _openalex_suche(http, autor, max_results, nur_biba, orcid)
             if hinweis:
                 hinweis += "; Ausweichquelle OpenAlex verwendet"
+            if orcid:
+                hinweis = (hinweis + "; " if hinweis else "") + f"über ORCID {orcid} gesucht"
 
         if download:
             ordner = DOWNLOAD_DIR / slug(autor)
@@ -287,7 +433,7 @@ async def search_publications(
 
 
 # ---------------------------------------------------------------------------
-# Tool 3: Zusammenfassung und Keywords
+# Tool 4: Zusammenfassung und Keywords
 # ---------------------------------------------------------------------------
 STOPWOERTER = set(
     """

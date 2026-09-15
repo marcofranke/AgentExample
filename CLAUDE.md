@@ -59,7 +59,19 @@ Drei Phasen: **Discovery** (AgentCards aller `AGENTS` holen) → **Routing** (lo
 
 ### Research-Agent + MCP (`ResearchAgent.py`, `biba_mcp_server.py`)
 
-Der einzige Agent mit Gedächtnis und mehreren Skills, und der einzige, der einen **MCP-Server als Kindprozess** (stdio) startet. Wichtige Grenze: *Der Agent ruft selbst keine Webseite auf.* Jede Datenbeschaffung – BIBA-Mitarbeitendenliste, Publikationssuche (Google Scholar mit OpenAlex als Ausweichquelle), PDF-Download, Zusammenfassung – ist ein MCP-Tool. Im Agenten bleiben nur Gedächtnis, TF-IDF-ähnliches Ranking und Sprachausgabe. Neue Datenquellen gehören folglich in `biba_mcp_server.py`.
+Der einzige Agent mit Gedächtnis, und der einzige, der einen **MCP-Server als Kindprozess** (stdio) startet. Wichtige Grenze: *Der Agent ruft selbst keine Webseite auf.* Jede Datenbeschaffung – BIBA-Mitarbeitendenliste, ORCID-Abgleich, Publikationssuche (Google Scholar mit OpenAlex als Ausweichquelle), PDF-Download, Zusammenfassung – ist ein MCP-Tool. Im Agenten bleiben nur Gedächtnis, TF-IDF-ähnliches Ranking und Sprachausgabe. Neue Datenquellen gehören folglich in `biba_mcp_server.py`.
+
+**ORCID-Abgleich (`find_orcid`).** Der Name von der BIBA-Webseite ist als Suchschlüssel mehrdeutig („Michael Freitag“, „Marco Franke“ gibt es mehrfach), und eine Namensverwechslung verfälscht direkt die Reviewer-Auswahl. Deshalb wird zu jedem Namen die ORCID-iD gesucht und an `search_publications` weitergereicht. Drei Punkte, die beim Ändern zu beachten sind:
+
+* **orcid.org lässt sich nicht parsen.** Sowohl die Trefferliste als auch jede Profilseite liefern denselben leeren Angular-Rumpf (`<app-root>`), ohne Namen, Einrichtung oder JSON-LD. Abgefragt wird deshalb `pub.orcid.org/v3.0/expanded-search/` – die Adresse, die die Webseite selbst benutzt. Ein BeautifulSoup-Parser auf dem HTML fände nichts; das ist nachgemessen.
+* **Name UND BIBA müssen passen.** Die ORCID-Suche ist großzügig: „Karl Hribernik“ liefert auch eine Person namens „Subrat Kumar Dang“, die sogar am BIBA ist. `_name_passt()` prüft deshalb zuerst Nach- und Vornamen, `_ist_biba()` danach die Einrichtung.
+* **`orcid` ist nur bei BIBA-Bestätigung gesetzt.** Profile ohne jede Einrichtungsangabe werden verworfen, auch wenn der Name eindeutig ist. Eine falsche iD wäre schlimmer als keine: Die Publikationssuche fiele ohne sie auf den Namen zurück, mit falscher iD lieferte sie nichts.
+
+In `_openalex_suche()` wird die iD **zusätzlich** zum BIBA-Institutionsfilter gesetzt, nicht statt seiner. OpenAlex hat an manchen ORCID-iDs fremde Arbeiten hängen (bei `0000-0003-1570-0168` Chemie-Aufsätze eines Namensvetters): 80 Arbeiten nur über ORCID, 27 mit beidem.
+
+Das Ergebnis wird im Gedächtnis vermerkt – **auch ein negatives** (`orcid_geprueft_am` ohne `orcid`). Sonst fragte jeder Serverstart erneut für alle ~86 Personen bei ORCID an. Der Abgleich läuft *vor* dem `continue` für bereits indexierte Personen, sonst bliebe das eingecheckte Gedächtnis für immer ohne ORCID-Angaben.
+
+**`find_reviewer` liefert immer zwei Vorschläge** (Erst- und Zweitgutachten, `RESEARCH_REVIEWER`). Reichen die inhaltlichen Überschneidungen nur für einen, wird das ausgeschrieben statt aufgefüllt.
 
 `MCPVerbindung` hält die Sitzung in einem eigenen Hintergrund-Task offen, weil die Kontextmanager von `stdio_client`/`ClientSession` im selben Task betreten und verlassen werden müssen – diese Konstruktion nicht zu „vereinfachen“ versuchen.
 
@@ -116,6 +128,9 @@ Alle optional, alle mit Standardwert im Code:
 | `RESEARCH_MAX_STAFF` | `0` (alle ~86) | Nur die ersten N Personen indexieren – zum schnellen Ausprobieren |
 | `RESEARCH_MAX_PUBS` | `3` | Veröffentlichungen pro Person |
 | `RESEARCH_SOURCE` | `auto` | `scholar`, `openalex` oder `auto` |
+| `RESEARCH_ORCID` | `1` | `0` = kein ORCID-Abgleich; Publikationssuche läuft dann nur über den Namen |
+| `RESEARCH_REVIEWER` | `2` | Anzahl der Reviewer-Vorschläge |
+| `ORCID_BIBA_PATTERN` | `\bbiba\b\|bremer institut` | Regex, an der im ORCID-Profil die BIBA-Zugehörigkeit erkannt wird |
 | `RESEARCH_MEMORY_FILE` | `memory/forschungsindex.json` | Gedächtnis-Datei |
 | `RESEARCH_DOWNLOAD_DIR` | `downloads` | Ordner für PDFs |
 | `OPENALEX_MAILTO` / `OPENALEX_INSTITUTION_ID` | leer / `I4387156409` | OpenAlex „polite pool“ bzw. BIBA-Institution |
